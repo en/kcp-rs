@@ -1,0 +1,6 @@
+[package]
+name = "kcp"
+version = "0.1.0"
+authors = ["Yuanchao Sun <yuanchao.sun@gmail.com>"]
+
+[dependencies]
