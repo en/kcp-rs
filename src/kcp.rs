@@ -24,6 +24,7 @@ const KCP_THRESH_MIN: u32 = 2;
 const KCP_PROBE_INIT: u32 = 7000;		// 7 secs to probe window size
 const KCP_PROBE_LIMIT: u32 = 120000;	// up to 120 secs to probe window
 
+#[derive(Default)]
 struct Segment {
     conv: u32,
     cmd: u32,
@@ -32,7 +33,6 @@ struct Segment {
     ts: u32,
     sn: u32,
     una: u32,
-    // len: u32,
     resendts: u32,
     rto: u32,
     fastack: u32,
@@ -42,24 +42,14 @@ struct Segment {
 
 impl Segment {
     fn new(size: usize) -> Segment {
-        Segment {
-            conv: 0,
-            cmd: 0,
-            frg: 0,
-            wnd: 0,
-            ts: 0,
-            sn: 0,
-            una: 0,
-            resendts: 0,
-            rto: 0,
-            fastack: 0,
-            xmit: 0,
-            data: Vec::with_capacity(size),
-        }
+        Segment { data: Vec::with_capacity(size), ..Default::default() }
     }
 }
 
-struct KCP {
+pub type OutputFn = fn(&[u8]) -> io::Result<usize>;
+
+#[derive(Default)]
+pub struct KCP {
     conv: u32,
     mtu: u32,
     mss: u32,
@@ -109,51 +99,32 @@ struct KCP {
     fastresend: i32,
     nocwnd: i32,
     stream: i32,
-    output: fn(&[u8]) -> io::Result<usize>,
+    output: Option<OutputFn>,
 }
 
 impl KCP {
-    fn new(conv: u32, output: fn(&[u8]) -> io::Result<usize>) -> KCP {
+    pub fn new(conv: u32, output: Option<OutputFn>) -> KCP {
         KCP {
             conv: conv,
-            snd_una: 0,
-            snd_nxt: 0,
-            rcv_nxt: 0,
-            ts_recent: 0,
-            ts_lastack: 0,
-            ts_probe: 0,
-            probe_wait: 0,
             snd_wnd: KCP_WND_SND,
             rcv_wnd: KCP_WND_RCV,
             rmt_wnd: KCP_WND_RCV,
-            cwnd: 0,
-            incr: 0,
-            probe: 0,
             mtu: KCP_MTU_DEF,
             mss: KCP_MTU_DEF - KCP_OVERHEAD,
-            stream: 0,
             buffer: Vec::with_capacity(((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize),
             snd_queue: VecDeque::new(),
             rcv_queue: VecDeque::new(),
             snd_buf: VecDeque::new(),
             rcv_buf: VecDeque::new(),
-            state: 0,
             acklist: Vec::new(),
-            rx_srtt: 0,
-            rx_rttval: 0,
             rx_rto: KCP_RTO_DEF,
             rx_minrto: KCP_RTO_MIN,
-            current: 0,
             interval: KCP_INTERVAL,
             ts_flush: KCP_INTERVAL,
-            nodelay: 0,
-            updated: 0,
             ssthresh: KCP_THRESH_INIT,
-            fastresend: 0,
-            nocwnd: 0,
-            xmit: 0,
             dead_link: KCP_DEADLINK,
             output: output,
+            ..Default::default()
         }
     }
 
@@ -597,9 +568,12 @@ impl KCP {
         for ack in &self.acklist {
             let size = ptr as u32;
             if size + KCP_OVERHEAD > self.mtu {
-                let f = self.output;
-                f(&self.buffer[..ptr]);
-                ptr = 0;
+                if let Some(f) = self.output {
+                    f(&self.buffer[..ptr]);
+                    ptr = 0;
+                } else {
+                    return;
+                }
             }
             seg.sn = ack.0;
             seg.ts = ack.1;
@@ -636,9 +610,12 @@ impl KCP {
             seg.cmd = KCP_CMD_WASK;
             let size = ptr as u32;
             if size + KCP_OVERHEAD > self.mtu {
-                let f = self.output;
-                f(&self.buffer[..ptr]);
-                ptr = 0;
+                if let Some(f) = self.output {
+                    f(&self.buffer[..ptr]);
+                    ptr = 0;
+                } else {
+                    return;
+                }
             }
             encode_seg(&mut self.buffer, &mut ptr, &seg);
         }
@@ -648,9 +625,12 @@ impl KCP {
             seg.cmd = KCP_CMD_WINS;
             let size = ptr as u32;
             if size + KCP_OVERHEAD > self.mtu {
-                let f = self.output;
-                f(&self.buffer[..ptr]);
-                ptr = 0;
+                if let Some(f) = self.output {
+                    f(&self.buffer[..ptr]);
+                    ptr = 0;
+                } else {
+                    return;
+                }
             }
             encode_seg(&mut self.buffer, &mut ptr, &seg);
         }
@@ -730,9 +710,12 @@ impl KCP {
                 let need = KCP_OVERHEAD as usize + len;
 
                 if size + need > self.mtu as usize {
-                    let f = self.output;
-                    f(&self.buffer[..ptr]);
-                    ptr = 0;
+                    if let Some(f) = self.output {
+                        f(&self.buffer[..ptr]);
+                        ptr = 0;
+                    } else {
+                        return;
+                    }
                 }
 
                 encode_seg(&mut self.buffer, &mut ptr, &segment);
@@ -750,9 +733,12 @@ impl KCP {
 
         // flash remain segments
         if ptr > 0 {
-            let f = self.output;
-            f(&self.buffer[..ptr]);
-            ptr = 0;
+            if let Some(f) = self.output {
+                f(&self.buffer[..ptr]);
+                ptr = 0;
+            } else {
+                return;
+            }
         }
 
         // update ssthresh
