@@ -1,3 +1,5 @@
+pub use kcp::{KCP};
+
 mod kcp;
 
 #[cfg(test)]
