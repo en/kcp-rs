@@ -37,7 +37,6 @@ impl Write for Route {
         let mut pkt = DelayPacket::new();
         pkt.ts = clock(); // TODO
         pkt.data.extend_from_slice(buf);
-        println!("send packet ts: {} len: {}", pkt.ts, buf.len());
         self.0.push_back(pkt);
 
         Ok(buf.len())
@@ -50,11 +49,14 @@ impl Write for Route {
 
 impl Read for Route {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let pkt = self.0.pop_front().unwrap();
-        println!("packet ts: {}", pkt.ts);
-        let buf = &mut buf[..pkt.data.len()];
-        buf.copy_from_slice(&pkt.data[..]);
-        Ok(0)
+        if let Some(pkt) = self.0.pop_front() {
+            let len = pkt.data.len();
+            let buf = &mut buf[..len];
+            buf.copy_from_slice(&pkt.data[..]);
+            return Ok(len);
+        } else {
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"))
+        }
     }
 }
 
@@ -81,13 +83,22 @@ fn standard_mode() {
     let mut alice = KCP::new(0x11223344, alice_sends);
     let mut bob = KCP::new(0x11223344, bob_sends);
 
-    // TODO: rm
-    let start = clock();
-
     let mut current = clock();
     let mut slap = current + 20;
-    let mut buffer: [u8; 2000] = [0; 2000];
     let mut index: u32 = 0;
+    let mut next: u32 = 0;
+    let mut sumrtt: i64 = 0;
+    let mut count = 0;
+    let mut maxrtt = 0;
+
+    alice.wndsize(128, 128);
+    bob.wndsize(128, 128);
+
+    alice.nodelay(0, 10, 0, 0);
+    bob.nodelay(0, 10, 0, 0);
+
+    let mut buffer: [u8; 2000] = [0; 2000];
+    let mut ts1 = clock();
 
     loop {
         thread::sleep(time::Duration::from_millis(1));
@@ -96,35 +107,78 @@ fn standard_mode() {
         alice.update(clock());
         bob.update(clock());
 
-        if current >= slap {
+        while current >= slap {
             let mut p: usize = 0;
             encode32u(&mut buffer[..], &mut p, index);
-            encode32u(&mut buffer[..], &mut p, current);
             index += 1;
-            alice.send(&mut buffer[..8]);
+            encode32u(&mut buffer[..], &mut p, current);
+            alice.send(&buffer[..8]);
             slap += 20;
         }
 
+        let a2b = pn.alice_to_bob.clone();
+        let mut a2b = a2b.lock().unwrap();
 
+        let b2a = pn.bob_to_alice.clone();
+        let mut b2a = b2a.lock().unwrap();
 
+        loop {
+            match a2b.read(&mut buffer[..]) {
+                Ok(hr) => {
+                    bob.input(&buffer[..hr]);
+                }
+                Err(_) => break,
+            };
+        }
 
-        // TODO: rm
-        let now = clock();
-        if now - start > 1000 {
+        loop {
+            match b2a.read(&mut buffer[..]) {
+                Ok(hr) => {
+                    alice.input(&buffer[..hr]);
+                }
+                Err(_) => break,
+            }
+        }
+
+        loop {
+            match bob.recv(&mut buffer[..10]) {
+                Ok(hr) => {
+                    bob.send(&buffer[..hr]);
+                }
+                Err(_) => break,
+            }
+        }
+
+        loop {
+            match alice.recv(&mut buffer[..10]) {
+                Ok(hr) => {
+                    let mut p: usize = 0;
+                    let sn = decode32u(&buffer, &mut p);
+                    let ts = decode32u(&buffer, &mut p);
+                    let rtt = current - ts;
+                    if sn != next {
+                        println!("ERROR sn {}<->{}", count, next);
+                        return;
+                    }
+                    next += 1;
+                    sumrtt += rtt as i64;
+                    count += 1;
+                    if rtt > maxrtt {
+                        maxrtt = rtt;
+                    }
+                    println!("[RECV] sn={} rtt={}", sn, rtt);
+                }
+                Err(_) => break,
+            }
+        }
+        if next > 1000 {
             break;
         }
     }
 
-    let r = pn.alice_to_bob.clone();
-    let mut r = r.lock().unwrap();
-    let mut output: [u8; 2048] = [0; 2048];
-    r.read(&mut output[..]);
-    println!("output: {:?}", &output[..512]);
-    let mut p: usize = 0;
-    let n = decode32u(&output, &mut p);
-    let t = decode32u(&output, &mut p);
-    println!("index: {}, current: {}", n, t);
-
+    ts1 = clock() - ts1;
+    println!("result ({}ms):", ts1);
+    println!("avgrtt={} maxrtt={}", sumrtt / count, maxrtt);
 }
 
 #[inline]
@@ -143,4 +197,15 @@ fn encode32u(buf: &mut [u8], p: &mut usize, n: u32) {
     buf[*p + 2] = (n >> 16) as u8;
     buf[*p + 3] = (n >> 24) as u8;
     *p += 4;
+}
+
+fn to_hex_string(bytes: &[u8]) {
+    let mut i = 0;
+    for b in bytes {
+        print!("0x{:02X} ", b);
+        i = i + 1;
+        if i % 4 == 0 {
+            println!("");
+        }
+    }
 }

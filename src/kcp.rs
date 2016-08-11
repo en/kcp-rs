@@ -172,7 +172,7 @@ impl<W: Write + Default> KCP<W> {
         Ok(length)
     }
 
-    fn recv(&mut self, buffer: &mut [u8]) -> Result<usize, i32> {
+    pub fn recv(&mut self, buffer: &mut [u8]) -> Result<usize, i32> {
         let mut len = buffer.len();
 
         if self.rcv_queue.is_empty() {
@@ -193,14 +193,17 @@ impl<W: Write + Default> KCP<W> {
         let mut count: usize = 0;
         for seg in &self.rcv_queue {
             let n = seg.data.len();
-            buffer[len..len + n].clone_from_slice(&seg.data[..]);
+            buffer[len..len + n].copy_from_slice(&seg.data[..]);
             len += n;
             count += 1;
             if seg.frg == 0 {
                 break;
             }
         }
-        self.rcv_queue.drain(count..);
+        if count > 0 {
+            let new_rcv_queue = self.rcv_queue.split_off(count);
+            self.rcv_queue = new_rcv_queue;
+        }
 
         assert!(len == peeksize);
         count = 0;
@@ -225,7 +228,7 @@ impl<W: Write + Default> KCP<W> {
         Ok(len)
     }
 
-    pub fn send(&mut self, buffer: &mut [u8]) -> Result<usize, i32> {
+    pub fn send(&mut self, buffer: &[u8]) -> Result<usize, i32> {
         let mut len = buffer.len();
         if len == 0 {
             return Err(-1);
@@ -348,10 +351,15 @@ impl<W: Write + Default> KCP<W> {
                 break;
             }
         }
-        self.snd_buf.drain(index..);
+        if index > 0 {
+            let new_snd_buf = self.snd_buf.split_off(index);
+            self.snd_buf = new_snd_buf;
+        }
     }
 
     fn parse_fastack(&mut self, sn: u32) {
+
+
         if timediff(sn, self.snd_una) < 0 || timediff(sn, self.snd_nxt) >= 0 {
             return;
         }
@@ -420,7 +428,7 @@ impl<W: Write + Default> KCP<W> {
         self.rcv_buf = new_rcv_buf;
     }
 
-    fn input(&mut self, data: &[u8]) -> i32 {
+    pub fn input(&mut self, data: &[u8]) -> i32 {
         let mut size = data.len();
         if size < 24 {
             return -1;
@@ -642,7 +650,8 @@ impl<W: Write + Default> KCP<W> {
                 newseg.cmd = KCP_CMD_PUSH;
                 newseg.wnd = seg.wnd;
                 newseg.ts = current;
-                newseg.sn = self.snd_nxt + 1;
+                newseg.sn = self.snd_nxt;
+                self.snd_nxt += 1;
                 newseg.una = self.rcv_nxt;
                 newseg.resendts = current;
                 newseg.rto = self.rx_rto;
@@ -710,7 +719,7 @@ impl<W: Write + Default> KCP<W> {
                 encode_seg(&mut self.buffer, &mut ptr, &segment);
 
                 if len > 0 {
-                    segment.data.extend_from_slice(&self.buffer[ptr..ptr + len]);
+                    &self.buffer[ptr..ptr + len].copy_from_slice(&segment.data[..]);
                     ptr += len;
                 }
 
@@ -753,7 +762,7 @@ impl<W: Write + Default> KCP<W> {
         }
     }
 
-    fn nodelay(&mut self, nodelay: i32, interval: i32, resend: i32, nc: i32) {
+    pub fn nodelay(&mut self, nodelay: i32, interval: i32, resend: i32, nc: i32) {
         if nodelay >= 0 {
             let nodelay = nodelay as u32;
             self.nodelay = nodelay;
@@ -780,7 +789,7 @@ impl<W: Write + Default> KCP<W> {
         }
     }
 
-    fn wndsize(&mut self, sndwnd: i32, rcvwnd: i32) {
+    pub fn wndsize(&mut self, sndwnd: i32, rcvwnd: i32) {
         if sndwnd > 0 {
             self.snd_wnd = sndwnd as u32;
         }
