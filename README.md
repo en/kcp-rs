@@ -4,7 +4,7 @@ A KCP implementation in Rust
 ## Testing
 I use Rust nightly, stable version should work too.
 ```
-$ RUST_BACKTRACE=1 cargo test -- --nocapture
+$ cargo test --release -- --nocapture
 ```
 
 ## TODO
