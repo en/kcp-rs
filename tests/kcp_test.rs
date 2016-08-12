@@ -1,5 +1,6 @@
 extern crate kcp;
 extern crate time as ctime;
+extern crate rand;
 
 use std::collections::VecDeque;
 use std::io;
@@ -7,6 +8,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
+use rand::Rng;
 
 use kcp::KCP;
 
@@ -14,7 +16,7 @@ use kcp::KCP;
 fn clock() -> u32 {
     let timespec = ctime::get_time();
     let mills = timespec.sec * 1000 + timespec.nsec as i64 / 1000 / 1000;
-    (mills & 0xffffffff) as u32 // ??
+    mills as u32
 }
 
 #[derive(Default)]
@@ -30,14 +32,48 @@ impl DelayPacket {
 }
 
 #[derive(Default)]
-struct Route(VecDeque<DelayPacket>);
+struct LatencySimulator {
+    tx: u32,
+    current: u32,
+    lost_rate: u32,
+    rtt_min: u32,
+    rtt_max: u32,
+    nmax: u32,
+    delay_tunnel: VecDeque<DelayPacket>,
+}
 
-impl Write for Route {
+impl LatencySimulator {
+    fn new(lost_rate: u32, rtt_min: u32, rtt_max: u32, nmax: u32) -> LatencySimulator {
+        LatencySimulator {
+            current: clock(),
+            lost_rate: lost_rate / 2,
+            rtt_min: rtt_min / 2,
+            rtt_max: rtt_max / 2,
+            nmax: nmax,
+            ..Default::default()
+        }
+    }
+}
+
+impl Write for LatencySimulator {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.tx += 1;
+        if rand::thread_rng().gen_range(0, 100) < self.lost_rate {
+            return Err(io::Error::new(io::ErrorKind::Other, "lost"));
+        }
+        if self.delay_tunnel.len() >= self.nmax as usize {
+            return Err(io::Error::new(io::ErrorKind::Other,
+                                      format!("exceeded nmax: {}", self.delay_tunnel.len())));
+        }
         let mut pkt = DelayPacket::new();
-        pkt.ts = clock(); // TODO
+        self.current = clock();
+        let mut delay = self.rtt_min;
+        if self.rtt_max > self.rtt_min {
+            delay += rand::random::<u32>() % (self.rtt_max - self.rtt_min);
+        }
+        pkt.ts = self.current + delay;
         pkt.data.extend_from_slice(buf);
-        self.0.push_back(pkt);
+        self.delay_tunnel.push_back(pkt);
 
         Ok(buf.len())
     }
@@ -47,39 +83,44 @@ impl Write for Route {
     }
 }
 
-impl Read for Route {
+impl Read for LatencySimulator {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(pkt) = self.0.pop_front() {
-            let len = pkt.data.len();
+        let len: usize;
+        if let Some(pkt) = self.delay_tunnel.front() {
+            self.current = clock();
+            if self.current < pkt.ts {
+                return Err(io::Error::new(io::ErrorKind::Other,
+                                          format!("current({}) < ts({})", self.current, pkt.ts)));
+            }
+            len = pkt.data.len();
+            if len > buf.len() {
+                return Err(io::Error::new(io::ErrorKind::Other,
+                                          format!("buf_size({}) < pkt_size({})", buf.len(), len)));
+            }
             let buf = &mut buf[..len];
             buf.copy_from_slice(&pkt.data[..]);
-            return Ok(len);
         } else {
-            Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"))
+            return Err(io::Error::new(io::ErrorKind::Other, "empty"));
         }
-    }
-}
 
-struct PoorNetwork {
-    alice_to_bob: Arc<Mutex<Route>>,
-    bob_to_alice: Arc<Mutex<Route>>,
-}
-
-impl PoorNetwork {
-    fn new() -> PoorNetwork {
-        PoorNetwork {
-            alice_to_bob: Arc::new(Mutex::new(Route(VecDeque::new()))),
-            bob_to_alice: Arc::new(Mutex::new(Route(VecDeque::new()))),
-        }
+        self.delay_tunnel.pop_front();
+        Ok(len)
     }
 }
 
 #[test]
-fn standard_mode() {
-    let pn = PoorNetwork::new();
+fn kcp_test() {
+    test("default");
+    // test("normal");
+    test("fast");
+}
 
-    let alice_sends = pn.alice_to_bob.clone();
-    let bob_sends = pn.bob_to_alice.clone();
+fn test(mode: &str) {
+    let alice_to_bob = Arc::new(Mutex::new(LatencySimulator::new(10, 60, 125, 1000)));
+    let bob_to_alice = Arc::new(Mutex::new(LatencySimulator::new(10, 60, 125, 1000)));
+
+    let alice_sends = alice_to_bob.clone();
+    let bob_sends = bob_to_alice.clone();
     let mut alice = KCP::new(0x11223344, alice_sends);
     let mut bob = KCP::new(0x11223344, bob_sends);
 
@@ -94,8 +135,22 @@ fn standard_mode() {
     alice.wndsize(128, 128);
     bob.wndsize(128, 128);
 
-    alice.nodelay(0, 10, 0, 0);
-    bob.nodelay(0, 10, 0, 0);
+    match mode {
+        "default" => {
+            alice.nodelay(0, 10, 0, 0);
+            bob.nodelay(0, 10, 0, 0);
+        }
+        "normal" => {
+            alice.nodelay(0, 10, 0, 1);
+            bob.nodelay(0, 10, 0, 1);
+        }
+        "fast" => {
+            alice.nodelay(1, 10, 2, 1);
+            bob.nodelay(1, 10, 2, 1);
+            alice.nodelay_ex(10, 1);
+        }
+        _ => {}
+    };
 
     let mut buffer: [u8; 2000] = [0; 2000];
     let mut ts1 = clock();
@@ -116,10 +171,10 @@ fn standard_mode() {
             slap += 20;
         }
 
-        let a2b = pn.alice_to_bob.clone();
+        let a2b = alice_to_bob.clone();
         let mut a2b = a2b.lock().unwrap();
 
-        let b2a = pn.bob_to_alice.clone();
+        let b2a = bob_to_alice.clone();
         let mut b2a = b2a.lock().unwrap();
 
         loop {
@@ -127,7 +182,7 @@ fn standard_mode() {
                 Ok(hr) => {
                     bob.input(&buffer[..hr]);
                 }
-                Err(_) => break,
+                Err(e) => break,
             };
         }
 
@@ -136,7 +191,7 @@ fn standard_mode() {
                 Ok(hr) => {
                     alice.input(&buffer[..hr]);
                 }
-                Err(_) => break,
+                Err(e) => break,
             }
         }
 
@@ -145,7 +200,7 @@ fn standard_mode() {
                 Ok(hr) => {
                     bob.send(&buffer[..hr]);
                 }
-                Err(_) => break,
+                Err(e) => break,
             }
         }
 
@@ -166,9 +221,9 @@ fn standard_mode() {
                     if rtt > maxrtt {
                         maxrtt = rtt;
                     }
-                    println!("[RECV] sn={} rtt={}", sn, rtt);
+                    println!("[RECV] mode={} sn={} rtt={}", mode, sn, rtt);
                 }
-                Err(_) => break,
+                Err(e) => break,
             }
         }
         if next > 1000 {
@@ -177,8 +232,13 @@ fn standard_mode() {
     }
 
     ts1 = clock() - ts1;
-    println!("result ({}ms):", ts1);
-    println!("avgrtt={} maxrtt={}", sumrtt / count, maxrtt);
+    let alice_c = alice_to_bob.clone();
+    let mut alice_c = alice_c.lock().unwrap();
+    println!("{} mode result ({}ms):", mode, ts1);
+    println!("avgrtt={} maxrtt={} tx={}",
+             sumrtt / count,
+             maxrtt,
+             alice_c.tx);
 }
 
 #[inline]

@@ -240,11 +240,7 @@ impl<W: Write + Default> KCP<W> {
                 let l = old.data.len();
                 if l < self.mss as usize {
                     let capacity = self.mss as usize - l;
-                    let extend = if len < capacity {
-                        len
-                    } else {
-                        capacity
-                    };
+                    let extend = if len < capacity { len } else { capacity };
                     old.data.extend_from_slice(&buffer[start..start + extend]);
                     start += extend;
                     old.frg = 0;
@@ -391,7 +387,7 @@ impl<W: Write + Default> KCP<W> {
             return;
         }
 
-        let mut index: usize = 0;
+        let mut index: usize = self.rcv_buf.len();
         for seg in self.rcv_buf.iter().rev() {
             if seg.sn == sn {
                 repeat = true;
@@ -400,16 +396,11 @@ impl<W: Write + Default> KCP<W> {
             if timediff(sn, seg.sn) > 0 {
                 break;
             }
-            index += 1;
+            index -= 1;
         }
 
         if !repeat {
-            let len = self.rcv_buf.len();
-            if len <= 1 {
-                self.rcv_buf.push_front(newseg);
-            } else {
-                self.rcv_buf.insert(len - index - 1, newseg);
-            }
+            self.rcv_buf.insert(index, newseg);
         } else {
             // ikcp_segment_delete(kcp, newseg);
         }
@@ -787,6 +778,11 @@ impl<W: Write + Default> KCP<W> {
         if nc >= 0 {
             self.nocwnd = nc;
         }
+    }
+
+    pub fn nodelay_ex(&mut self, minrto: u32, fastresend: i32) {
+        self.rx_minrto = minrto;
+        self.fastresend = fastresend;
     }
 
     pub fn wndsize(&mut self, sndwnd: i32, rcvwnd: i32) {
