@@ -47,8 +47,7 @@ impl Segment {
     }
 }
 
-#[derive(Default)]
-pub struct KCP<W: Write + Default> {
+pub struct KCP<W: Write> {
     conv: u32,
     mtu: u32,
     mss: u32,
@@ -101,9 +100,30 @@ pub struct KCP<W: Write + Default> {
     output: Arc<Mutex<W>>,
 }
 
-impl<W: Write + Default> KCP<W> {
+impl<W: Write> KCP<W> {
     pub fn new(conv: u32, output: Arc<Mutex<W>>) -> KCP<W> {
         let mut kcp = KCP {
+            state: 0,
+            snd_una: 0,
+            snd_nxt: 0,
+            rcv_nxt: 0,
+            ts_recent: 0,
+            ts_lastack: 0,
+            rx_rttval: 0,
+            rx_srtt: 0,
+            cwnd: 0,
+            probe: 0,
+            current: 0,
+            xmit: 0,
+            nodelay: 0,
+            updated: 0,
+            ts_probe: 0,
+            probe_wait: 0,
+            incr: 0,
+            fastresend: 0,
+            nocwnd: 0,
+            stream: 0,
+
             conv: conv,
             snd_wnd: KCP_WND_SND,
             rcv_wnd: KCP_WND_RCV,
@@ -123,7 +143,6 @@ impl<W: Write + Default> KCP<W> {
             ssthresh: KCP_THRESH_INIT,
             dead_link: KCP_DEADLINK,
             output: output,
-            ..Default::default()
         };
         kcp.buffer.resize(((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize, 0);
         kcp
@@ -794,7 +813,7 @@ impl<W: Write + Default> KCP<W> {
         }
     }
 
-    fn ikcp_waitsnd(&self) -> usize {
+    pub fn waitsnd(&self) -> usize {
         self.snd_buf.len() + self.snd_queue.len()
     }
 }

@@ -8,7 +8,6 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
-use rand::Rng;
 
 use kcp::KCP;
 
@@ -31,7 +30,6 @@ impl DelayPacket {
     }
 }
 
-#[derive(Default)]
 struct LatencySimulator {
     tx: u32,
     current: u32,
@@ -40,17 +38,20 @@ struct LatencySimulator {
     rtt_max: u32,
     nmax: u32,
     delay_tunnel: VecDeque<DelayPacket>,
+    rng: Random,
 }
 
 impl LatencySimulator {
     fn new(lost_rate: u32, rtt_min: u32, rtt_max: u32, nmax: u32) -> LatencySimulator {
         LatencySimulator {
+            tx: 0,
             current: clock(),
             lost_rate: lost_rate / 2,
             rtt_min: rtt_min / 2,
             rtt_max: rtt_max / 2,
             nmax: nmax,
-            ..Default::default()
+            delay_tunnel: VecDeque::new(),
+            rng: Random::new(100),
         }
     }
 }
@@ -58,7 +59,7 @@ impl LatencySimulator {
 impl Write for LatencySimulator {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.tx += 1;
-        if rand::thread_rng().gen_range(0, 100) < self.lost_rate {
+        if self.rng.uniform() < self.lost_rate {
             return Err(io::Error::new(io::ErrorKind::Other, "lost"));
         }
         if self.delay_tunnel.len() >= self.nmax as usize {
@@ -116,6 +117,7 @@ fn kcp_test() {
 }
 
 fn test(mode: &str) {
+
     let alice_to_bob = Arc::new(Mutex::new(LatencySimulator::new(10, 60, 125, 1000)));
     let bob_to_alice = Arc::new(Mutex::new(LatencySimulator::new(10, 60, 125, 1000)));
 
@@ -267,5 +269,38 @@ fn to_hex_string(bytes: &[u8]) {
         if i % 4 == 0 {
             println!("");
         }
+    }
+}
+
+struct Random {
+    size: usize,
+    seeds: Vec<u32>,
+}
+
+impl Random {
+    fn new(n: usize) -> Random {
+        let mut r = Random {
+            size: 0,
+            seeds: Vec::new(),
+        };
+        r.seeds.resize(n, 0);
+        r
+    }
+
+    fn uniform(&mut self) -> u32 {
+        if self.seeds.len() == 0 {
+            return 0;
+        }
+        if self.size == 0 {
+            for i in 0..self.seeds.len() {
+                self.seeds[i] = i as u32;
+            }
+            self.size = self.seeds.len();
+        }
+        let i = rand::random::<usize>() % self.size;
+        let x = self.seeds[i];
+        self.size -= 1;
+        self.seeds[i] = self.seeds[self.size];
+        x
     }
 }
