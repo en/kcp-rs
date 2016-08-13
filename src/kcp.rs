@@ -316,16 +316,20 @@ impl<W: Write> KCP<W> {
             return;
         }
         let mut index: usize = 0;
-        for seg in &self.snd_buf {
+        let mut rm = false;
+        for (i, seg) in self.snd_buf.iter().enumerate() {
             if sn == seg.sn {
+                index = i;
+                rm = true;
                 break;
             }
             if timediff(sn, seg.sn) < 0 {
                 return;
             }
-            index += 1;
         }
-        self.snd_buf.remove(index);
+        if rm {
+            self.snd_buf.remove(index);
+        }
     }
 
     fn parse_una(&mut self, una: u32) {
