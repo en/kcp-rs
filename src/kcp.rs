@@ -16,10 +16,10 @@ const KCP_ASK_TELL: u32 = 2;		// need to send KCP_CMD_WINS
 const KCP_WND_SND: u32 = 32;
 const KCP_WND_RCV: u32 = 32;
 const KCP_MTU_DEF: u32 = 1400;
-const KCP_ACK_FAST: u32 = 3;
+// const KCP_ACK_FAST: u32 = 3; // never used
 const KCP_INTERVAL: u32 = 100;
 const KCP_OVERHEAD: u32 = 24;
-const KCP_DEADLINK: u32 = 20;
+// const KCP_DEADLINK: u32 = 20; // never used
 const KCP_THRESH_INIT: u32 = 2;
 const KCP_THRESH_MIN: u32 = 2;
 const KCP_PROBE_INIT: u32 = 7000;		// 7 secs to probe window size
@@ -51,14 +51,13 @@ pub struct KCP<W: Write> {
     conv: u32,
     mtu: u32,
     mss: u32,
-    state: u32,
-
+    // state: u32, // never used
     snd_una: u32,
     snd_nxt: u32,
     rcv_nxt: u32,
 
-    ts_recent: u32,
-    ts_lastack: u32,
+    // ts_recent: u32, // never used
+    // ts_lastack: u32, // never used
     ssthresh: u32,
 
     rx_rttval: u32,
@@ -78,12 +77,12 @@ pub struct KCP<W: Write> {
     xmit: u32,
 
     nodelay: u32,
-    updated: u32,
+    updated: bool,
 
     ts_probe: u32,
     probe_wait: u32,
 
-    dead_link: u32,
+    // dead_link: u32, // never used
     incr: u32,
 
     snd_queue: VecDeque<Segment>,
@@ -94,21 +93,21 @@ pub struct KCP<W: Write> {
     acklist: Vec<(u32, u32)>,
     buffer: Vec<u8>,
 
-    fastresend: i32,
-    nocwnd: i32,
-    stream: i32,
+    fastresend: u32,
+    nocwnd: bool,
+    stream: bool,
     output: Arc<Mutex<W>>,
 }
 
 impl<W: Write> KCP<W> {
     pub fn new(conv: u32, output: Arc<Mutex<W>>) -> KCP<W> {
         let mut kcp = KCP {
-            state: 0,
+            // state: 0,
             snd_una: 0,
             snd_nxt: 0,
             rcv_nxt: 0,
-            ts_recent: 0,
-            ts_lastack: 0,
+            // ts_recent: 0,
+            // ts_lastack: 0,
             rx_rttval: 0,
             rx_srtt: 0,
             cwnd: 0,
@@ -116,13 +115,13 @@ impl<W: Write> KCP<W> {
             current: 0,
             xmit: 0,
             nodelay: 0,
-            updated: 0,
+            updated: false,
             ts_probe: 0,
             probe_wait: 0,
             incr: 0,
             fastresend: 0,
-            nocwnd: 0,
-            stream: 0,
+            nocwnd: false,
+            stream: false,
 
             conv: conv,
             snd_wnd: KCP_WND_SND,
@@ -141,59 +140,15 @@ impl<W: Write> KCP<W> {
             interval: KCP_INTERVAL,
             ts_flush: KCP_INTERVAL,
             ssthresh: KCP_THRESH_INIT,
-            dead_link: KCP_DEADLINK,
+            // dead_link: KCP_DEADLINK,
             output: output,
         };
         kcp.buffer.resize(((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize, 0);
         kcp
     }
 
-    pub fn update(&mut self, current: u32) {
-        self.current = current;
-        if self.updated == 0 {
-            self.updated = 1;
-            self.ts_flush = self.current;
-        }
-        let mut slap: i32 = timediff(self.current, self.ts_flush);
-
-        if slap >= 10000 || slap < -10000 {
-            self.ts_flush = self.current;
-            slap = 0;
-        }
-
-        if slap >= 0 {
-            self.ts_flush += self.interval;
-            if timediff(self.current, self.ts_flush) >= 0 {
-                self.ts_flush = self.current + self.interval;
-            }
-            self.flush();
-        }
-    }
-
-    fn peeksize(&self) -> Result<usize, i32> {
-        let seg = match self.rcv_queue.front() {
-            Some(x) => x,
-            None => return Err(-1),
-        };
-        if seg.frg == 0 {
-            return Ok(seg.data.len());
-        }
-        if self.rcv_queue.len() < (seg.frg + 1) as usize {
-            return Err(-1);
-        }
-        let mut length: usize = 0;
-        for seg in &self.rcv_queue {
-            length += seg.data.len();
-            if seg.frg == 0 {
-                break;
-            }
-        }
-        Ok(length)
-    }
-
     pub fn recv(&mut self, buffer: &mut [u8]) -> Result<usize, i32> {
         let mut len = buffer.len();
-
         if self.rcv_queue.is_empty() {
             return Err(-1);
         }
@@ -237,14 +192,37 @@ impl<W: Write> KCP<W> {
             }
         }
 
-        let mut new_rcv_buf = self.rcv_buf.split_off(count);
-        self.rcv_queue.append(&mut self.rcv_buf);
-        self.rcv_buf = new_rcv_buf;
+        if count > 0 {
+            let new_rcv_buf = self.rcv_buf.split_off(count);
+            self.rcv_queue.append(&mut self.rcv_buf);
+            self.rcv_buf = new_rcv_buf;
+        }
 
         if self.rcv_queue.len() < self.rcv_wnd as usize && recover {
             self.probe |= KCP_ASK_TELL;
         }
         Ok(len)
+    }
+
+    fn peeksize(&self) -> Result<usize, i32> {
+        let seg = match self.rcv_queue.front() {
+            Some(x) => x,
+            None => return Err(-1),
+        };
+        if seg.frg == 0 {
+            return Ok(seg.data.len());
+        }
+        if self.rcv_queue.len() < (seg.frg + 1) as usize {
+            return Err(-1);
+        }
+        let mut length: usize = 0;
+        for seg in &self.rcv_queue {
+            length += seg.data.len();
+            if seg.frg == 0 {
+                break;
+            }
+        }
+        Ok(length)
     }
 
     pub fn send(&mut self, buffer: &[u8]) -> Result<usize, i32> {
@@ -254,7 +232,7 @@ impl<W: Write> KCP<W> {
         }
         let mut start: usize = 0;
 
-        if self.stream != 0 {
+        if self.stream {
             if let Some(old) = self.snd_queue.back_mut() {
                 let l = old.data.len();
                 if l < self.mss as usize {
@@ -263,7 +241,7 @@ impl<W: Write> KCP<W> {
                     old.data.extend_from_slice(&buffer[start..start + extend]);
                     start += extend;
                     old.frg = 0;
-                    len -= extend; // TODO
+                    len -= extend;
                 }
             };
 
@@ -273,7 +251,6 @@ impl<W: Write> KCP<W> {
         }
 
         let mut count = if len <= self.mss as usize {
-            // TODO
             1
         } else {
             (len + self.mss as usize - 1) / self.mss as usize
@@ -288,25 +265,19 @@ impl<W: Write> KCP<W> {
         }
 
         for i in 0..count {
-            let size = if len > self.mss as usize {
-                self.mss as usize
-            } else {
-                len
-            };
+            let size = cmp::min(self.mss as usize, len);
             let mut seg = Segment::new(size);
             if len > 0 {
                 seg.data.extend_from_slice(&buffer[start..start + size]);
             }
-            seg.frg = if self.stream == 0 {
+            seg.frg = if !self.stream {
                 (count - i - 1) as u32
             } else {
                 0
             };
             self.snd_queue.push_back(seg);
 
-            if start + size < buffer.len() {
-                start += size;
-            }
+            start += size;
             len -= size;
         }
         Ok(0)
@@ -373,8 +344,6 @@ impl<W: Write> KCP<W> {
     }
 
     fn parse_fastack(&mut self, sn: u32) {
-
-
         if timediff(sn, self.snd_una) < 0 || timediff(sn, self.snd_nxt) >= 0 {
             return;
         }
@@ -385,16 +354,6 @@ impl<W: Write> KCP<W> {
                 seg.fastack += 1;
             }
         }
-    }
-
-    #[inline]
-    fn ack_push(&mut self, sn: u32, ts: u32) {
-        self.acklist.push((sn, ts));
-    }
-
-    #[inline]
-    fn ack_get(&self, index: usize) -> (u32, u32) {
-        self.acklist[index]
     }
 
     fn parse_data(&mut self, newseg: Segment) {
@@ -433,14 +392,16 @@ impl<W: Write> KCP<W> {
             }
             index += 1;
         }
-        let mut new_rcv_buf = self.rcv_buf.split_off(index);
-        self.rcv_queue.append(&mut self.rcv_buf);
-        self.rcv_buf = new_rcv_buf;
+        if index > 0 {
+            let new_rcv_buf = self.rcv_buf.split_off(index);
+            self.rcv_queue.append(&mut self.rcv_buf);
+            self.rcv_buf = new_rcv_buf;
+        }
     }
 
     pub fn input(&mut self, data: &[u8]) -> i32 {
         let mut size = data.len();
-        if size < 24 {
+        if size < KCP_OVERHEAD as usize {
             return -1;
         }
         let old_una = self.snd_una;
@@ -498,7 +459,7 @@ impl<W: Write> KCP<W> {
                 }
             } else if cmd == KCP_CMD_PUSH {
                 if timediff(sn, self.rcv_nxt + self.rcv_wnd) < 0 {
-                    self.ack_push(sn, ts);
+                    self.acklist.push((sn, ts));
                     if timediff(sn, self.rcv_nxt) >= 0 {
                         let mut seg = Segment::new(len);
                         seg.conv = conv;
@@ -511,7 +472,6 @@ impl<W: Write> KCP<W> {
 
                         if len > 0 {
                             seg.data.extend_from_slice(&data[p..p + len]);
-                            p += len;
                         }
                         self.parse_data(seg);
                     }
@@ -555,18 +515,17 @@ impl<W: Write> KCP<W> {
         0
     }
 
-
     fn wnd_unused(&self) -> u32 {
         let nrcv_que = self.rcv_queue.len() as u32;
         if nrcv_que < self.rcv_wnd {
             return self.rcv_wnd - nrcv_que;
         }
-        return 0;
+        0
     }
 
     fn flush(&mut self) {
         // 'ikcp_update' haven't been called.
-        if self.updated == 0 {
+        if !self.updated {
             return;
         }
         let current = self.current;
@@ -574,6 +533,7 @@ impl<W: Write> KCP<W> {
         let mut change = false;
         let mut ptr: usize = 0;
         let mut seg = Segment::new(0);
+        let mut route = self.output.lock().unwrap();
 
         seg.conv = self.conv;
         seg.cmd = KCP_CMD_ACK;
@@ -585,10 +545,8 @@ impl<W: Write> KCP<W> {
 
         // flush acknowledges
         for ack in &self.acklist {
-            let size = ptr as u32;
-            if size + KCP_OVERHEAD > self.mtu {
-                let mut route = self.output.lock().unwrap();
-                route.write(&self.buffer[..ptr]);
+            if ptr as u32 + KCP_OVERHEAD > self.mtu {
+                route.write(&self.buffer[..ptr]).ok();
                 ptr = 0;
             }
             seg.sn = ack.0;
@@ -624,10 +582,8 @@ impl<W: Write> KCP<W> {
         // flush window probing commands
         if (self.probe & KCP_ASK_SEND) != 0 {
             seg.cmd = KCP_CMD_WASK;
-            let size = ptr as u32;
-            if size + KCP_OVERHEAD > self.mtu {
-                let mut route = self.output.lock().unwrap();
-                route.write(&self.buffer[..ptr]);
+            if ptr as u32 + KCP_OVERHEAD > self.mtu {
+                route.write(&self.buffer[..ptr]).ok();
                 ptr = 0;
             }
             encode_seg(&mut self.buffer, &mut ptr, &seg);
@@ -636,10 +592,8 @@ impl<W: Write> KCP<W> {
         // flush window probing commands
         if (self.probe & KCP_ASK_TELL) != 0 {
             seg.cmd = KCP_CMD_WINS;
-            let size = ptr as u32;
-            if size + KCP_OVERHEAD > self.mtu {
-                let mut route = self.output.lock().unwrap();
-                route.write(&self.buffer[..ptr]);
+            if ptr as u32 + KCP_OVERHEAD > self.mtu {
+                route.write(&self.buffer[..ptr]).ok();
                 ptr = 0;
             }
             encode_seg(&mut self.buffer, &mut ptr, &seg);
@@ -649,7 +603,7 @@ impl<W: Write> KCP<W> {
 
         // calculate window size
         let mut cwnd = cmp::min(self.snd_wnd, self.rmt_wnd);
-        if self.nocwnd == 0 {
+        if !self.nocwnd {
             cwnd = cmp::min(self.cwnd, cwnd);
         }
 
@@ -673,12 +627,12 @@ impl<W: Write> KCP<W> {
             }
         }
         // calculate resent
-        let resent: u32 = if self.fastresend > 0 {
-            self.fastresend as u32
+        let resent = if self.fastresend > 0 {
+            self.fastresend
         } else {
-            0xffffffff
+            u32::max_value()
         };
-        let rtomin: u32 = if self.nodelay == 0 {
+        let rtomin = if self.nodelay == 0 {
             self.rx_rto >> 3
         } else {
             0
@@ -716,13 +670,11 @@ impl<W: Write> KCP<W> {
                 segment.wnd = seg.wnd;
                 segment.una = self.rcv_nxt;
 
-                let size = ptr;
                 let len = segment.data.len();
                 let need = KCP_OVERHEAD as usize + len;
 
-                if size + need > self.mtu as usize {
-                    let mut route = self.output.lock().unwrap();
-                    route.write(&self.buffer[..ptr]);
+                if ptr + need > self.mtu as usize {
+                    route.write(&self.buffer[..ptr]).ok();
                     ptr = 0;
                 }
 
@@ -733,17 +685,16 @@ impl<W: Write> KCP<W> {
                     ptr += len;
                 }
 
-                if segment.xmit >= self.dead_link {
-                    self.state = 0xFFFFFFFF;
-                }
+                // never used
+                // if segment.xmit >= self.dead_link {
+                //     self.state = -1;
+                // }
             }
         }
 
         // flash remain segments
         if ptr > 0 {
-            let mut route = self.output.lock().unwrap();
-            route.write(&self.buffer[..ptr]);
-            ptr = 0;
+            route.write(&self.buffer[..ptr]).ok();
         }
 
         // update ssthresh
@@ -772,7 +723,71 @@ impl<W: Write> KCP<W> {
         }
     }
 
-    pub fn nodelay(&mut self, nodelay: i32, interval: i32, resend: i32, nc: i32) {
+    pub fn update(&mut self, current: u32) {
+        self.current = current;
+        if !self.updated {
+            self.updated = true;
+            self.ts_flush = self.current;
+        }
+        let mut slap = timediff(self.current, self.ts_flush);
+
+        if slap >= 10000 || slap < -10000 {
+            self.ts_flush = self.current;
+            slap = 0;
+        }
+
+        if slap >= 0 {
+            self.ts_flush += self.interval;
+            if timediff(self.current, self.ts_flush) >= 0 {
+                self.ts_flush = self.current + self.interval;
+            }
+            self.flush();
+        }
+    }
+
+    pub fn check(&self, current: u32) -> u32 {
+        let mut ts_flush = self.ts_flush;
+        let mut tm_packet = u32::max_value();
+
+        if !self.updated {
+            return current;
+        }
+
+        if timediff(current, ts_flush) >= 10000 || timediff(current, ts_flush) < -10000 {
+            ts_flush = current;
+        }
+
+        if timediff(current, ts_flush) >= 0 {
+            return current;
+        }
+
+        let tm_flush = timediff(ts_flush, current) as u32;
+        for seg in &self.snd_buf {
+            let diff = timediff(seg.resendts, current);
+            if diff <= 0 {
+                return current;
+            }
+            if (diff as u32) < tm_packet {
+                tm_packet = diff as u32;
+            }
+        }
+
+        let minimal = cmp::min(cmp::min(tm_packet, tm_flush), self.interval);
+
+        current + minimal
+    }
+
+    pub fn setmtu(&mut self, mtu: u32) -> bool {
+        if mtu < 50 || mtu < KCP_OVERHEAD {
+            return false;
+        }
+        self.mtu = mtu;
+        self.mss = self.mtu - KCP_OVERHEAD;
+        self.buffer.resize(((mtu + KCP_OVERHEAD) * 3) as usize, 0);
+        true
+    }
+
+    pub fn nodelay(&mut self, nodelay: i32, interval: i32, resend: i32, nc: bool) {
         if nodelay >= 0 {
             let nodelay = nodelay as u32;
             self.nodelay = nodelay;
@@ -792,16 +807,9 @@ impl<W: Write> KCP<W> {
             self.interval = interval;
         }
         if resend >= 0 {
-            self.fastresend = resend;
+            self.fastresend = resend as u32;
         }
-        if nc >= 0 {
-            self.nocwnd = nc;
-        }
-    }
-
-    pub fn nodelay_ex(&mut self, minrto: u32, fastresend: i32) {
-        self.rx_minrto = minrto;
-        self.fastresend = fastresend;
+        self.nocwnd = nc;
     }
 
     pub fn wndsize(&mut self, sndwnd: i32, rcvwnd: i32) {

@@ -111,12 +111,16 @@ impl Read for LatencySimulator {
 
 #[test]
 fn kcp_test() {
-    test("default");
-    // test("normal");
-    test("fast");
+    let mut results: Vec<String> = Vec::new();
+    results.push(test("default"));
+    results.push(test("normal"));
+    results.push(test("fast"));
+    for result in results {
+        println!("{}", result);
+    }
 }
 
-fn test(mode: &str) {
+fn test(mode: &str) -> String {
 
     let alice_to_bob = Arc::new(Mutex::new(LatencySimulator::new(10, 60, 125, 1000)));
     let bob_to_alice = Arc::new(Mutex::new(LatencySimulator::new(10, 60, 125, 1000)));
@@ -139,17 +143,16 @@ fn test(mode: &str) {
 
     match mode {
         "default" => {
-            alice.nodelay(0, 10, 0, 0);
-            bob.nodelay(0, 10, 0, 0);
+            alice.nodelay(0, 10, 0, false);
+            bob.nodelay(0, 10, 0, false);
         }
         "normal" => {
-            alice.nodelay(0, 10, 0, 1);
-            bob.nodelay(0, 10, 0, 1);
+            alice.nodelay(0, 10, 0, true);
+            bob.nodelay(0, 10, 0, true);
         }
         "fast" => {
-            alice.nodelay(1, 10, 2, 1);
-            bob.nodelay(1, 10, 2, 1);
-            alice.nodelay_ex(10, 1);
+            alice.nodelay(1, 10, 2, true);
+            bob.nodelay(1, 10, 2, true);
         }
         _ => {}
     };
@@ -215,7 +218,7 @@ fn test(mode: &str) {
                     let rtt = current - ts;
                     if sn != next {
                         println!("ERROR sn {}<->{}", count, next);
-                        return;
+                        return "err".to_string();
                     }
                     next += 1;
                     sumrtt += rtt as i64;
@@ -234,13 +237,8 @@ fn test(mode: &str) {
     }
 
     ts1 = clock() - ts1;
-    let alice_c = alice_to_bob.clone();
-    let mut alice_c = alice_c.lock().unwrap();
-    println!("{} mode result ({}ms):", mode, ts1);
-    println!("avgrtt={} maxrtt={} tx={}",
-             sumrtt / count,
-             maxrtt,
-             alice_c.tx);
+    format!("{} mode result ({}ms):\n", mode, ts1) +
+    &format!("avgrtt={} maxrtt={}", sumrtt / count, maxrtt)
 }
 
 #[inline]
