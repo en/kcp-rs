@@ -45,6 +45,20 @@ impl Segment {
     fn new(size: usize) -> Segment {
         Segment { data: Vec::with_capacity(size), ..Default::default() }
     }
+
+    fn reset_except_data(&mut self) {
+        self.conv = 0;
+        self.cmd = 0;
+        self.frg = 0;
+        self.wnd = 0;
+        self.ts = 0;
+        self.sn = 0;
+        self.una = 0;
+        self.resendts = 0;
+        self.rto = 0;
+        self.fastack = 0;
+        self.xmit = 0;
+    }
 }
 
 pub struct KCP<W: Write> {
@@ -233,14 +247,14 @@ impl<W: Write> KCP<W> {
         let mut start: usize = 0;
 
         if self.stream {
-            if let Some(old) = self.snd_queue.back_mut() {
-                let l = old.data.len();
+            if let Some(seg) = self.snd_queue.back_mut() {
+                let l = seg.data.len();
                 if l < self.mss as usize {
                     let capacity = self.mss as usize - l;
                     let extend = if len < capacity { len } else { capacity };
-                    old.data.extend_from_slice(&buffer[start..start + extend]);
+                    seg.reset_except_data();
+                    seg.data.extend_from_slice(&buffer[start..start + extend]);
                     start += extend;
-                    old.frg = 0;
                     len -= extend;
                 }
             };
