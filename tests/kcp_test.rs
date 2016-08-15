@@ -3,8 +3,7 @@ extern crate time as ctime;
 extern crate rand;
 
 use std::collections::VecDeque;
-use std::io;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
@@ -160,7 +159,7 @@ fn test(mode: &str) -> String {
     let mut buffer: [u8; 2000] = [0; 2000];
     let mut ts1 = clock();
 
-    loop {
+    'outer: loop {
         thread::sleep(time::Duration::from_millis(1));
         current = clock();
 
@@ -172,7 +171,7 @@ fn test(mode: &str) -> String {
             encode32u(&mut buffer[..], &mut p, index);
             index += 1;
             encode32u(&mut buffer[..], &mut p, current);
-            alice.send(&buffer[..8]);
+            alice.send(&buffer[..8]).unwrap();
             slap += 20;
         }
 
@@ -187,7 +186,7 @@ fn test(mode: &str) -> String {
                 Ok(hr) => {
                     bob.input(&buffer[..hr]);
                 }
-                Err(e) => break,
+                Err(_) => break,
             };
         }
 
@@ -196,22 +195,22 @@ fn test(mode: &str) -> String {
                 Ok(hr) => {
                     alice.input(&buffer[..hr]);
                 }
-                Err(e) => break,
+                Err(_) => break,
             }
         }
 
         loop {
             match bob.recv(&mut buffer[..10]) {
                 Ok(hr) => {
-                    bob.send(&buffer[..hr]);
+                    bob.send(&buffer[..hr]).unwrap();
                 }
-                Err(e) => break,
+                Err(_) => break,
             }
         }
 
         loop {
             match alice.recv(&mut buffer[..10]) {
-                Ok(hr) => {
+                Ok(_) => {
                     let mut p: usize = 0;
                     let sn = decode32u(&buffer, &mut p);
                     let ts = decode32u(&buffer, &mut p);
@@ -227,12 +226,12 @@ fn test(mode: &str) -> String {
                         maxrtt = rtt;
                     }
                     println!("[RECV] mode={} sn={} rtt={}", mode, sn, rtt);
+                    if next > 1000 {
+                        break 'outer;
+                    }
                 }
-                Err(e) => break,
+                Err(_) => break,
             }
-        }
-        if next > 1000 {
-            break;
         }
     }
 
@@ -257,17 +256,6 @@ fn encode32u(buf: &mut [u8], p: &mut usize, n: u32) {
     buf[*p + 2] = (n >> 16) as u8;
     buf[*p + 3] = (n >> 24) as u8;
     *p += 4;
-}
-
-fn to_hex_string(bytes: &[u8]) {
-    let mut i = 0;
-    for b in bytes {
-        print!("0x{:02X} ", b);
-        i = i + 1;
-        if i % 4 == 0 {
-            println!("");
-        }
-    }
 }
 
 struct Random {
