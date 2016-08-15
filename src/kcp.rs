@@ -309,30 +309,23 @@ impl<W: Write> KCP<W> {
     }
 
     fn parse_ack(&mut self, sn: u32) {
-        if timediff(sn, self.snd_una) < 0 || timediff(sn, self.snd_nxt) >= 0 {
+        if sn < self.snd_una || sn >= self.snd_nxt {
             return;
         }
-        let mut index: usize = 0;
-        let mut rm = false;
-        for (i, seg) in self.snd_buf.iter().enumerate() {
-            if sn == seg.sn {
-                index = i;
-                rm = true;
+        for i in 0..self.snd_buf.len() {
+            if sn == self.snd_buf[i].sn {
+                self.snd_buf.remove(i);
+                break;
+            } else if sn < self.snd_buf[i].sn {
                 break;
             }
-            if timediff(sn, seg.sn) < 0 {
-                return;
-            }
-        }
-        if rm {
-            self.snd_buf.remove(index);
         }
     }
 
     fn parse_una(&mut self, una: u32) {
         let mut index: usize = 0;
         for seg in &self.snd_buf {
-            if timediff(una, seg.sn) > 0 {
+            if una > seg.sn {
                 index += 1;
             } else {
                 break;
@@ -345,11 +338,11 @@ impl<W: Write> KCP<W> {
     }
 
     fn parse_fastack(&mut self, sn: u32) {
-        if timediff(sn, self.snd_una) < 0 || timediff(sn, self.snd_nxt) >= 0 {
+        if sn < self.snd_una || sn >= self.snd_nxt {
             return;
         }
         for seg in &mut self.snd_buf {
-            if timediff(sn, seg.sn) < 0 {
+            if sn < seg.sn {
                 break;
             } else if sn != seg.sn {
                 seg.fastack += 1;
@@ -359,20 +352,18 @@ impl<W: Write> KCP<W> {
 
     fn parse_data(&mut self, newseg: Segment) {
         let sn = newseg.sn;
-        let mut repeat = false;
-
-        if timediff(sn, self.rcv_nxt + self.rcv_wnd) >= 0 || timediff(sn, self.rcv_nxt) < 0 {
+        if sn >= self.rcv_nxt + self.rcv_wnd || sn < self.rcv_nxt {
             // ikcp_segment_delete(kcp, newseg);
             return;
         }
 
+        let mut repeat = false;
         let mut index: usize = self.rcv_buf.len();
         for seg in self.rcv_buf.iter().rev() {
-            if seg.sn == sn {
+            if sn == seg.sn {
                 repeat = true;
                 break;
-            }
-            if timediff(sn, seg.sn) > 0 {
+            } else if sn > seg.sn {
                 break;
             }
             index -= 1;
@@ -385,6 +376,7 @@ impl<W: Write> KCP<W> {
         }
 
         index = 0;
+        // move available data from rcv_buf -> rcv_queue
         for seg in &self.rcv_buf {
             if seg.sn == self.rcv_nxt && self.rcv_queue.len() < self.rcv_wnd as usize {
                 self.rcv_nxt += 1;
@@ -444,9 +436,9 @@ impl<W: Write> KCP<W> {
             self.parse_una(una);
             self.shrink_buf();
             if cmd == KCP_CMD_ACK {
-                let diff = timediff(self.current, ts);
-                if diff >= 0 {
-                    self.update_ack(diff as u32);
+                let rtt = timediff(self.current, ts);
+                if rtt >= 0 {
+                    self.update_ack(rtt as u32);
                 }
                 self.parse_ack(sn);
                 self.shrink_buf();
@@ -454,14 +446,14 @@ impl<W: Write> KCP<W> {
                     flag = true;
                     maxack = sn;
                 } else {
-                    if timediff(sn, maxack) > 0 {
+                    if sn > maxack {
                         maxack = sn;
                     }
                 }
             } else if cmd == KCP_CMD_PUSH {
-                if timediff(sn, self.rcv_nxt + self.rcv_wnd) < 0 {
+                if sn < self.rcv_nxt + self.rcv_wnd {
                     self.acklist.push((sn, ts));
-                    if timediff(sn, self.rcv_nxt) >= 0 {
+                    if sn >= self.rcv_nxt {
                         let mut seg = Segment::new(len);
                         seg.conv = conv;
                         seg.cmd = cmd;
@@ -470,14 +462,13 @@ impl<W: Write> KCP<W> {
                         seg.ts = ts;
                         seg.sn = sn;
                         seg.una = una;
-
-                        if len > 0 {
-                            seg.data.extend_from_slice(&data[p..p + len]);
-                        }
+                        seg.data.extend_from_slice(&data[p..p + len]);
                         self.parse_data(seg);
                     }
                 }
             } else if cmd == KCP_CMD_WASK {
+                // ready to send back KCP_CMD_WINS in `flush`
+                // tell remote my window size
                 self.probe |= KCP_ASK_TELL;
             } else if cmd == KCP_CMD_WINS {
                 // do nothing
@@ -492,7 +483,7 @@ impl<W: Write> KCP<W> {
             self.parse_fastack(maxack);
         }
 
-        if timediff(self.snd_una, old_una) > 0 {
+        if self.snd_una > old_una {
             if self.cwnd < self.rmt_wnd {
                 let mss = self.mss;
                 if self.cwnd < self.ssthresh {
@@ -525,7 +516,7 @@ impl<W: Write> KCP<W> {
     }
 
     fn flush(&mut self) {
-        // 'ikcp_update' haven't been called.
+        // `update` haven't been called.
         if !self.updated {
             return;
         }
@@ -538,11 +529,8 @@ impl<W: Write> KCP<W> {
 
         seg.conv = self.conv;
         seg.cmd = KCP_CMD_ACK;
-        seg.frg = 0;
         seg.wnd = self.wnd_unused();
         seg.una = self.rcv_nxt;
-        seg.sn = 0;
-        seg.ts = 0;
 
         // flush acknowledges
         for ack in &self.acklist {
@@ -609,7 +597,7 @@ impl<W: Write> KCP<W> {
         }
 
         // move data from snd_queue to snd_buf
-        while timediff(self.snd_nxt, self.snd_una + cwnd) < 0 {
+        while self.snd_nxt < self.snd_una + cwnd {
             if let Some(mut newseg) = self.snd_queue.pop_front() {
                 newseg.conv = self.conv;
                 newseg.cmd = KCP_CMD_PUSH;
@@ -724,6 +712,9 @@ impl<W: Write> KCP<W> {
         }
     }
 
+    // update state (call it repeatedly, every 10ms-100ms), or you can ask
+    // `check` when to call it again (without `input`/`send` calling).
+    // `current` - current timestamp in millisec.
     pub fn update(&mut self, current: u32) {
         self.current = current;
         if !self.updated {
