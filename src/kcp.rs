@@ -1,6 +1,6 @@
 use std::cmp;
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{self, Error, ErrorKind, Write};
 use std::sync::{Arc, Mutex};
 
 const KCP_RTO_NDL: u32 = 30;		// no delay min rto
@@ -44,20 +44,6 @@ struct Segment {
 impl Segment {
     fn new(size: usize) -> Segment {
         Segment { data: Vec::with_capacity(size), ..Default::default() }
-    }
-
-    fn reset_except_data(&mut self) {
-        self.conv = 0;
-        self.cmd = 0;
-        self.frg = 0;
-        self.wnd = 0;
-        self.ts = 0;
-        self.sn = 0;
-        self.una = 0;
-        self.resendts = 0;
-        self.rto = 0;
-        self.fastack = 0;
-        self.xmit = 0;
     }
 }
 
@@ -239,51 +225,48 @@ impl<W: Write> KCP<W> {
         Ok(length)
     }
 
-    pub fn send(&mut self, buffer: &[u8]) -> Result<usize, i32> {
-        let mut len = buffer.len();
+    // user/upper level send, returns the number of fragments
+    pub fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut len = buf.len();
         if len == 0 {
-            return Err(-1);
+            return Err(Error::new(ErrorKind::InvalidInput, "no data available"));
         }
         let mut start: usize = 0;
 
+        // append to previous segment in streaming mode (if possible)
         if self.stream {
             if let Some(seg) = self.snd_queue.back_mut() {
                 let l = seg.data.len();
                 if l < self.mss as usize {
                     let capacity = self.mss as usize - l;
-                    let extend = if len < capacity { len } else { capacity };
-                    seg.reset_except_data();
-                    seg.data.extend_from_slice(&buffer[start..start + extend]);
+                    let extend = cmp::min(len, capacity);
+                    seg.data.extend_from_slice(&buf[start..start + extend]);
+                    seg.frg = 0;
                     start += extend;
                     len -= extend;
+                    if len == 0 {
+                        return Ok(1);
+                    }
                 }
             };
-
-            if len <= 0 {
-                return Ok(0);
-            }
         }
 
-        let mut count = if len <= self.mss as usize {
+        let count = if len <= self.mss as usize {
             1
         } else {
             (len + self.mss as usize - 1) / self.mss as usize
         };
 
         if count > 255 {
-            return Err(-2);
+            return Err(Error::new(ErrorKind::InvalidInput, "data too long"));
         }
+        assert!(count > 0);
 
-        if count == 0 {
-            count = 1;
-        }
-
+        // fragment
         for i in 0..count {
             let size = cmp::min(self.mss as usize, len);
             let mut seg = Segment::new(size);
-            if len > 0 {
-                seg.data.extend_from_slice(&buffer[start..start + size]);
-            }
+            seg.data.extend_from_slice(&buf[start..start + size]);
             seg.frg = if !self.stream {
                 (count - i - 1) as u32
             } else {
@@ -294,7 +277,7 @@ impl<W: Write> KCP<W> {
             start += size;
             len -= size;
         }
-        Ok(0)
+        Ok(count)
     }
 
     fn update_ack(&mut self, rtt: u32) {
