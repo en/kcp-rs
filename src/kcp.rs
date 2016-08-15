@@ -164,36 +164,36 @@ impl<W: Write> KCP<W> {
 
         let recover = self.rcv_queue.len() >= self.rcv_wnd as usize;
         len = 0;
-        let mut count: usize = 0;
+        let mut index: usize = 0;
         for seg in &self.rcv_queue {
             let n = seg.data.len();
             buffer[len..len + n].copy_from_slice(&seg.data[..]);
             len += n;
-            count += 1;
+            index += 1;
             if seg.frg == 0 {
                 break;
             }
         }
-        if count > 0 {
-            let new_rcv_queue = self.rcv_queue.split_off(count);
+        if index > 0 {
+            let new_rcv_queue = self.rcv_queue.split_off(index);
             self.rcv_queue = new_rcv_queue;
         }
 
         assert!(len == peeksize);
-        count = 0;
+        index = 0;
         let mut nrcv_que = self.rcv_queue.len();
         for seg in &self.rcv_buf {
             if seg.sn == self.rcv_nxt && nrcv_que < self.rcv_wnd as usize {
-                self.rcv_nxt += 1;
                 nrcv_que += 1;
-                count += 1;
+                self.rcv_nxt += 1;
+                index += 1;
             } else {
                 break;
             }
         }
 
-        if count > 0 {
-            let new_rcv_buf = self.rcv_buf.split_off(count);
+        if index > 0 {
+            let new_rcv_buf = self.rcv_buf.split_off(index);
             self.rcv_queue.append(&mut self.rcv_buf);
             self.rcv_buf = new_rcv_buf;
         }
@@ -375,15 +375,17 @@ impl<W: Write> KCP<W> {
             // ikcp_segment_delete(kcp, newseg);
         }
 
-        index = 0;
         // move available data from rcv_buf -> rcv_queue
+        index = 0;
+        let mut nrcv_que = self.rcv_queue.len();
         for seg in &self.rcv_buf {
-            if seg.sn == self.rcv_nxt && self.rcv_queue.len() < self.rcv_wnd as usize {
+            if seg.sn == self.rcv_nxt && nrcv_que < self.rcv_wnd as usize {
+                nrcv_que += 1;
                 self.rcv_nxt += 1;
+                index += 1;
             } else {
                 break;
             }
-            index += 1;
         }
         if index > 0 {
             let new_rcv_buf = self.rcv_buf.split_off(index);
