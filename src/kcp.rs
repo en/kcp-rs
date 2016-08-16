@@ -147,27 +147,29 @@ impl<W: Write> KCP<W> {
         kcp
     }
 
-    pub fn recv(&mut self, buffer: &mut [u8]) -> Result<usize, i32> {
-        let mut len = buffer.len();
+    // user/upper level recv: returns size, returns below zero for EAGAIN
+    pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.rcv_queue.is_empty() {
-            return Err(-1);
+            return Err(Error::new(ErrorKind::Other, "EOF"));
         }
-
+        let mut len = buf.len();
         let peeksize = match self.peeksize() {
             Ok(x) => x,
-            Err(_) => return Err(-2),
+            Err(_) => return Err(Error::new(ErrorKind::UnexpectedEof, "unexpected EOF")),
         };
 
         if peeksize > len {
-            return Err(-3);
+            return Err(Error::new(ErrorKind::InvalidInput, "short buffer"));
         }
 
         let recover = self.rcv_queue.len() >= self.rcv_wnd as usize;
+
+        // merge fragment
         len = 0;
         let mut index: usize = 0;
         for seg in &self.rcv_queue {
             let n = seg.data.len();
-            buffer[len..len + n].copy_from_slice(&seg.data[..]);
+            buf[len..len + n].copy_from_slice(&seg.data[..]);
             len += n;
             index += 1;
             if seg.frg == 0 {
@@ -178,8 +180,9 @@ impl<W: Write> KCP<W> {
             let new_rcv_queue = self.rcv_queue.split_off(index);
             self.rcv_queue = new_rcv_queue;
         }
-
         assert!(len == peeksize);
+
+        // move available data from rcv_buf -> rcv_queue
         index = 0;
         let mut nrcv_que = self.rcv_queue.len();
         for seg in &self.rcv_buf {
@@ -198,12 +201,16 @@ impl<W: Write> KCP<W> {
             self.rcv_buf = new_rcv_buf;
         }
 
+        // fast recover
         if self.rcv_queue.len() < self.rcv_wnd as usize && recover {
+            // ready to send back KCP_CMD_WINS in `flush`
+            // tell remote my window size
             self.probe |= KCP_ASK_TELL;
         }
         Ok(len)
     }
 
+    // peek data size
     fn peeksize(&self) -> Result<usize, i32> {
         let seg = match self.rcv_queue.front() {
             Some(x) => x,
@@ -394,10 +401,10 @@ impl<W: Write> KCP<W> {
         }
     }
 
-    pub fn input(&mut self, data: &[u8]) -> i32 {
+    pub fn input(&mut self, data: &[u8]) -> io::Result<usize> {
         let mut size = data.len();
         if size < KCP_OVERHEAD as usize {
-            return -1;
+            return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
         }
         let old_una = self.snd_una;
         let mut p: usize = 0;
@@ -410,7 +417,7 @@ impl<W: Write> KCP<W> {
 
             let conv = decode32u(data, &mut p);
             if conv != self.conv {
-                return -1;
+                return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
             }
 
             let cmd = decode8u(data, &mut p);
@@ -425,13 +432,13 @@ impl<W: Write> KCP<W> {
 
             let len = len as usize;
             if size < len {
-                return -2;
+                return Err(Error::new(ErrorKind::UnexpectedEof, "unexpected EOF"));
             }
 
             let cmd = cmd as u32;
             if cmd != KCP_CMD_PUSH && cmd != KCP_CMD_ACK && cmd != KCP_CMD_WASK &&
                cmd != KCP_CMD_WINS {
-                return -3;
+                return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
             }
 
             self.rmt_wnd = wnd as u32;
@@ -475,7 +482,7 @@ impl<W: Write> KCP<W> {
             } else if cmd == KCP_CMD_WINS {
                 // do nothing
             } else {
-                return -3;
+                return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
             }
 
             p += len;
@@ -506,7 +513,7 @@ impl<W: Write> KCP<W> {
                 }
             }
         }
-        0
+        Ok(0)
     }
 
     fn wnd_unused(&self) -> u32 {
@@ -542,7 +549,6 @@ impl<W: Write> KCP<W> {
             }
             seg.sn = ack.0;
             seg.ts = ack.1;
-
             encode_seg(&mut self.buffer, &mut ptr, &seg);
         }
         self.acklist.clear();
@@ -589,7 +595,6 @@ impl<W: Write> KCP<W> {
             }
             encode_seg(&mut self.buffer, &mut ptr, &seg);
         }
-
         self.probe = 0;
 
         // calculate window size
@@ -668,7 +673,6 @@ impl<W: Write> KCP<W> {
                     route.write(&self.buffer[..ptr]).ok();
                     ptr = 0;
                 }
-
                 encode_seg(&mut self.buffer, &mut ptr, &segment);
 
                 if len > 0 {
@@ -739,13 +743,20 @@ impl<W: Write> KCP<W> {
         }
     }
 
+    // Determine when should you invoke `update`:
+    // returns when you should invoke `update` in millisec, if there
+    // is no `input`/`send` calling. you can call `update` in that
+    // time, instead of call update repeatly.
+    // Important to reduce unnacessary `update` invoking. use it to
+    // schedule `update` (eg. implementing an epoll-like mechanism,
+    // or optimize `update` when handling massive kcp connections)
     pub fn check(&self, current: u32) -> u32 {
-        let mut ts_flush = self.ts_flush;
-        let mut tm_packet = u32::max_value();
-
         if !self.updated {
             return current;
         }
+
+        let mut ts_flush = self.ts_flush;
+        let mut tm_packet = u32::max_value();
 
         if timediff(current, ts_flush) >= 10000 || timediff(current, ts_flush) < -10000 {
             ts_flush = current;

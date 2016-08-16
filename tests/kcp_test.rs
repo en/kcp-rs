@@ -184,7 +184,7 @@ fn test(mode: &str) -> String {
         loop {
             match a2b.read(&mut buffer[..]) {
                 Ok(hr) => {
-                    bob.input(&buffer[..hr]);
+                    bob.input(&buffer[..hr]).ok();
                 }
                 Err(_) => break,
             };
@@ -193,7 +193,7 @@ fn test(mode: &str) -> String {
         loop {
             match b2a.read(&mut buffer[..]) {
                 Ok(hr) => {
-                    alice.input(&buffer[..hr]);
+                    alice.input(&buffer[..hr]).ok();
                 }
                 Err(_) => break,
             }
