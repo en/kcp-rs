@@ -22,5 +22,5 @@ avgrtt=138 maxrtt=339
 
 ## TODO
 - [x] Migrate all tests from C version and fix bugs
-- [ ] Verify correctness
+- [x] Verify correctness
 - [ ] Improve the quality of code and make it more Rust-y
