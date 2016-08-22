@@ -152,25 +152,24 @@ impl<W: Write> KCP<W> {
         if self.rcv_queue.is_empty() {
             return Err(Error::new(ErrorKind::Other, "EOF"));
         }
-        let mut len = buf.len();
         let peeksize = match self.peeksize() {
             Ok(x) => x,
             Err(_) => return Err(Error::new(ErrorKind::UnexpectedEof, "unexpected EOF")),
         };
 
-        if peeksize > len {
+        if peeksize > buf.len() {
             return Err(Error::new(ErrorKind::InvalidInput, "short buffer"));
         }
 
         let recover = self.rcv_queue.len() >= self.rcv_wnd as usize;
 
         // merge fragment
-        len = 0;
+        let mut p: usize = 0;
         let mut index: usize = 0;
         for seg in &self.rcv_queue {
-            let n = seg.data.len();
-            buf[len..len + n].copy_from_slice(&seg.data[..]);
-            len += n;
+            let l = seg.data.len();
+            buf[p..p + l].copy_from_slice(&seg.data[..]);
+            p += l;
             index += 1;
             if seg.frg == 0 {
                 break;
@@ -180,7 +179,7 @@ impl<W: Write> KCP<W> {
             let new_rcv_queue = self.rcv_queue.split_off(index);
             self.rcv_queue = new_rcv_queue;
         }
-        assert!(len == peeksize);
+        assert!(p == peeksize);
 
         // move available data from rcv_buf -> rcv_queue
         index = 0;
@@ -207,7 +206,7 @@ impl<W: Write> KCP<W> {
             // tell remote my window size
             self.probe |= KCP_ASK_TELL;
         }
-        Ok(len)
+        Ok(p)
     }
 
     // peek data size
@@ -234,11 +233,11 @@ impl<W: Write> KCP<W> {
 
     // user/upper level send, returns the number of fragments
     pub fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut len = buf.len();
-        if len == 0 {
+        let mut n = buf.len();
+        if n == 0 {
             return Err(Error::new(ErrorKind::InvalidInput, "no data available"));
         }
-        let mut start: usize = 0;
+        let mut p: usize = 0;
 
         // append to previous segment in streaming mode (if possible)
         if self.stream {
@@ -246,22 +245,22 @@ impl<W: Write> KCP<W> {
                 let l = seg.data.len();
                 if l < self.mss as usize {
                     let capacity = self.mss as usize - l;
-                    let extend = cmp::min(len, capacity);
-                    seg.data.extend_from_slice(&buf[start..start + extend]);
+                    let extend = cmp::min(n, capacity);
+                    seg.data.extend_from_slice(&buf[p..p + extend]);
                     seg.frg = 0;
-                    start += extend;
-                    len -= extend;
-                    if len == 0 {
+                    p += extend;
+                    n -= extend;
+                    if n == 0 {
                         return Ok(1);
                     }
                 }
             };
         }
 
-        let count = if len <= self.mss as usize {
+        let count = if n <= self.mss as usize {
             1
         } else {
-            (len + self.mss as usize - 1) / self.mss as usize
+            (n + self.mss as usize - 1) / self.mss as usize
         };
 
         if count > 255 {
@@ -271,9 +270,9 @@ impl<W: Write> KCP<W> {
 
         // fragment
         for i in 0..count {
-            let size = cmp::min(self.mss as usize, len);
+            let size = cmp::min(self.mss as usize, n);
             let mut seg = Segment::new(size);
-            seg.data.extend_from_slice(&buf[start..start + size]);
+            seg.data.extend_from_slice(&buf[p..p + size]);
             seg.frg = if !self.stream {
                 (count - i - 1) as u32
             } else {
@@ -281,8 +280,8 @@ impl<W: Write> KCP<W> {
             };
             self.snd_queue.push_back(seg);
 
-            start += size;
-            len -= size;
+            p += size;
+            n -= size;
         }
         Ok(count)
     }
@@ -401,9 +400,9 @@ impl<W: Write> KCP<W> {
         }
     }
 
-    pub fn input(&mut self, data: &[u8]) -> io::Result<usize> {
-        let mut size = data.len();
-        if size < KCP_OVERHEAD as usize {
+    pub fn input(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut n = buf.len();
+        if n < KCP_OVERHEAD as usize {
             return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
         }
         let old_una = self.snd_una;
@@ -411,27 +410,27 @@ impl<W: Write> KCP<W> {
         let mut flag = false;
         let mut maxack: u32 = 0;
         loop {
-            if size < KCP_OVERHEAD as usize {
+            if n < KCP_OVERHEAD as usize {
                 break;
             }
 
-            let conv = decode32u(data, &mut p);
+            let conv = decode32u(buf, &mut p);
             if conv != self.conv {
                 return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
             }
 
-            let cmd = decode8u(data, &mut p);
-            let frg = decode8u(data, &mut p);
-            let wnd = decode16u(data, &mut p);
-            let ts = decode32u(data, &mut p);
-            let sn = decode32u(data, &mut p);
-            let una = decode32u(data, &mut p);
-            let len = decode32u(data, &mut p);
+            let cmd = decode8u(buf, &mut p);
+            let frg = decode8u(buf, &mut p);
+            let wnd = decode16u(buf, &mut p);
+            let ts = decode32u(buf, &mut p);
+            let sn = decode32u(buf, &mut p);
+            let una = decode32u(buf, &mut p);
+            let len = decode32u(buf, &mut p);
 
-            size -= KCP_OVERHEAD as usize;
+            n -= KCP_OVERHEAD as usize;
 
             let len = len as usize;
-            if size < len {
+            if n < len {
                 return Err(Error::new(ErrorKind::UnexpectedEof, "unexpected EOF"));
             }
 
@@ -471,7 +470,7 @@ impl<W: Write> KCP<W> {
                         seg.ts = ts;
                         seg.sn = sn;
                         seg.una = una;
-                        seg.data.extend_from_slice(&data[p..p + len]);
+                        seg.data.extend_from_slice(&buf[p..p + len]);
                         self.parse_data(seg);
                     }
                 }
@@ -486,7 +485,7 @@ impl<W: Write> KCP<W> {
             }
 
             p += len;
-            size -= len;
+            n -= len;
         }
         if flag {
             self.parse_fastack(maxack);
@@ -532,7 +531,7 @@ impl<W: Write> KCP<W> {
         let current = self.current;
         let mut lost = false;
         let mut change = false;
-        let mut ptr: usize = 0;
+        let mut p: usize = 0;
         let mut seg = Segment::new(0);
         let mut route = self.output.lock().unwrap();
 
@@ -543,13 +542,13 @@ impl<W: Write> KCP<W> {
 
         // flush acknowledges
         for ack in &self.acklist {
-            if ptr as u32 + KCP_OVERHEAD > self.mtu {
-                route.write(&self.buffer[..ptr]).ok();
-                ptr = 0;
+            if p as u32 + KCP_OVERHEAD > self.mtu {
+                route.write(&self.buffer[..p]).ok();
+                p = 0;
             }
             seg.sn = ack.0;
             seg.ts = ack.1;
-            encode_seg(&mut self.buffer, &mut ptr, &seg);
+            encode_seg(&mut self.buffer, &mut p, &seg);
         }
         self.acklist.clear();
 
@@ -579,21 +578,21 @@ impl<W: Write> KCP<W> {
         // flush window probing commands
         if (self.probe & KCP_ASK_SEND) != 0 {
             seg.cmd = KCP_CMD_WASK;
-            if ptr as u32 + KCP_OVERHEAD > self.mtu {
-                route.write(&self.buffer[..ptr]).ok();
-                ptr = 0;
+            if p as u32 + KCP_OVERHEAD > self.mtu {
+                route.write(&self.buffer[..p]).ok();
+                p = 0;
             }
-            encode_seg(&mut self.buffer, &mut ptr, &seg);
+            encode_seg(&mut self.buffer, &mut p, &seg);
         }
 
         // flush window probing commands
         if (self.probe & KCP_ASK_TELL) != 0 {
             seg.cmd = KCP_CMD_WINS;
-            if ptr as u32 + KCP_OVERHEAD > self.mtu {
-                route.write(&self.buffer[..ptr]).ok();
-                ptr = 0;
+            if p as u32 + KCP_OVERHEAD > self.mtu {
+                route.write(&self.buffer[..p]).ok();
+                p = 0;
             }
-            encode_seg(&mut self.buffer, &mut ptr, &seg);
+            encode_seg(&mut self.buffer, &mut p, &seg);
         }
         self.probe = 0;
 
@@ -669,15 +668,15 @@ impl<W: Write> KCP<W> {
                 let len = segment.data.len();
                 let need = KCP_OVERHEAD as usize + len;
 
-                if ptr + need > self.mtu as usize {
-                    route.write(&self.buffer[..ptr]).ok();
-                    ptr = 0;
+                if p + need > self.mtu as usize {
+                    route.write(&self.buffer[..p]).ok();
+                    p = 0;
                 }
-                encode_seg(&mut self.buffer, &mut ptr, &segment);
+                encode_seg(&mut self.buffer, &mut p, &segment);
 
                 if len > 0 {
-                    &self.buffer[ptr..ptr + len].copy_from_slice(&segment.data[..]);
-                    ptr += len;
+                    &self.buffer[p..p + len].copy_from_slice(&segment.data[..]);
+                    p += len;
                 }
 
                 // never used
@@ -688,8 +687,8 @@ impl<W: Write> KCP<W> {
         }
 
         // flash remain segments
-        if ptr > 0 {
-            route.write(&self.buffer[..ptr]).ok();
+        if p > 0 {
+            route.write(&self.buffer[..p]).ok();
         }
 
         // update ssthresh
@@ -887,13 +886,13 @@ fn decode32u(buf: &[u8], p: &mut usize) -> u32 {
     u32::from_le(n)
 }
 
-fn encode_seg(ptr: &mut [u8], p: &mut usize, seg: &Segment) {
-    encode32u(ptr, p, seg.conv);
-    encode8u(ptr, p, seg.cmd as u8);
-    encode8u(ptr, p, seg.frg as u8);
-    encode16u(ptr, p, seg.wnd as u16);
-    encode32u(ptr, p, seg.ts);
-    encode32u(ptr, p, seg.sn);
-    encode32u(ptr, p, seg.una);
-    encode32u(ptr, p, seg.data.len() as u32);
+fn encode_seg(buf: &mut [u8], p: &mut usize, seg: &Segment) {
+    encode32u(buf, p, seg.conv);
+    encode8u(buf, p, seg.cmd as u8);
+    encode8u(buf, p, seg.frg as u8);
+    encode16u(buf, p, seg.wnd as u16);
+    encode32u(buf, p, seg.ts);
+    encode32u(buf, p, seg.sn);
+    encode32u(buf, p, seg.una);
+    encode32u(buf, p, seg.data.len() as u32);
 }
