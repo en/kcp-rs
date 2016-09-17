@@ -1,4 +1,6 @@
 extern crate futures;
+extern crate rand;
+#[macro_use]
 extern crate tokio_core;
 
 pub use kcp::KCP;
@@ -10,10 +12,35 @@ use std::net::{SocketAddr, Shutdown};
 
 use futures::Async;
 use tokio_core::io::IoFuture;
+use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Handle, PollEvented};
+
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+
+struct KcpTunnel {
+    socket: UdpSocket,
+    addr: SocketAddr,
+}
+
+impl Write for KcpTunnel {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.socket.send_to(buf, &self.addr).unwrap();
+        if n == buf.len() {
+            Ok(n)
+        } else {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "failed to send"))
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 pub struct KcpStream {
     io: PollEvented<u8>,
+    addr: SocketAddr,
 }
 
 pub struct KcpStreamNew {
@@ -30,9 +57,14 @@ impl KcpStream {
         unimplemented!()
     }
 
-    fn new(// connected_stream: mio::tcp::TcpStream,
-           handle: &Handle)
-           -> IoFuture<KcpStream> {
+    fn new(socket: UdpSocket, addr: &SocketAddr, handle: &Handle) -> IoFuture<KcpStream> {
+        let conv = rand::random::<u32>();
+        let tunnel = Arc::new(Mutex::new(KcpTunnel {
+            socket: socket,
+            addr: *addr,
+        }));
+        let kcp = KCP::new(conv, tunnel);
+
         unimplemented!()
     }
 
