@@ -63,7 +63,6 @@ impl KcpStream {
             socket: socket,
             addr: *addr,
         }));
-        let kcp = KCP::new(conv, tunnel);
 
         unimplemented!()
     }

@@ -1,7 +1,6 @@
 use std::cmp;
 use std::collections::VecDeque;
 use std::io::{self, Error, ErrorKind, Write};
-use std::sync::{Arc, Mutex};
 
 const KCP_RTO_NDL: u32 = 30;		// no delay min rto
 const KCP_RTO_MIN: u32 = 100;		// normal min rto
@@ -47,7 +46,7 @@ impl Segment {
     }
 }
 
-pub struct KCP<W: Write> {
+pub struct KCP {
     conv: u32,
     mtu: u32,
     mss: u32,
@@ -96,11 +95,10 @@ pub struct KCP<W: Write> {
     fastresend: u32,
     nocwnd: bool,
     stream: bool,
-    output: Arc<Mutex<W>>,
 }
 
-impl<W: Write> KCP<W> {
-    pub fn new(conv: u32, output: Arc<Mutex<W>>) -> KCP<W> {
+impl KCP {
+    pub fn new(conv: u32) -> KCP {
         let mut kcp = KCP {
             // state: 0,
             snd_una: 0,
@@ -139,9 +137,7 @@ impl<W: Write> KCP<W> {
             rx_minrto: KCP_RTO_MIN,
             interval: KCP_INTERVAL,
             ts_flush: KCP_INTERVAL,
-            ssthresh: KCP_THRESH_INIT,
-            // dead_link: KCP_DEADLINK,
-            output: output,
+            ssthresh: KCP_THRESH_INIT, // dead_link: KCP_DEADLINK,
         };
         kcp.buffer.resize(((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize, 0);
         kcp
@@ -523,7 +519,7 @@ impl<W: Write> KCP<W> {
         0
     }
 
-    fn flush(&mut self) {
+    fn flush<W: Write>(&mut self, output: &mut W) {
         // `update` haven't been called.
         if !self.updated {
             return;
@@ -533,7 +529,6 @@ impl<W: Write> KCP<W> {
         let mut change = false;
         let mut p: usize = 0;
         let mut seg = Segment::new(0);
-        let mut route = self.output.lock().unwrap();
 
         seg.conv = self.conv;
         seg.cmd = KCP_CMD_ACK;
@@ -543,7 +538,7 @@ impl<W: Write> KCP<W> {
         // flush acknowledges
         for ack in &self.acklist {
             if p as u32 + KCP_OVERHEAD > self.mtu {
-                route.write(&self.buffer[..p]).ok();
+                output.write_all(&self.buffer[..p]);
                 p = 0;
             }
             seg.sn = ack.0;
@@ -579,7 +574,7 @@ impl<W: Write> KCP<W> {
         if (self.probe & KCP_ASK_SEND) != 0 {
             seg.cmd = KCP_CMD_WASK;
             if p as u32 + KCP_OVERHEAD > self.mtu {
-                route.write(&self.buffer[..p]).ok();
+                output.write_all(&self.buffer[..p]);
                 p = 0;
             }
             encode_seg(&mut self.buffer, &mut p, &seg);
@@ -589,7 +584,7 @@ impl<W: Write> KCP<W> {
         if (self.probe & KCP_ASK_TELL) != 0 {
             seg.cmd = KCP_CMD_WINS;
             if p as u32 + KCP_OVERHEAD > self.mtu {
-                route.write(&self.buffer[..p]).ok();
+                output.write_all(&self.buffer[..p]);
                 p = 0;
             }
             encode_seg(&mut self.buffer, &mut p, &seg);
@@ -669,7 +664,7 @@ impl<W: Write> KCP<W> {
                 let need = KCP_OVERHEAD as usize + len;
 
                 if p + need > self.mtu as usize {
-                    route.write(&self.buffer[..p]).ok();
+                    output.write_all(&self.buffer[..p]);
                     p = 0;
                 }
                 encode_seg(&mut self.buffer, &mut p, &segment);
@@ -688,7 +683,7 @@ impl<W: Write> KCP<W> {
 
         // flash remain segments
         if p > 0 {
-            route.write(&self.buffer[..p]).ok();
+            output.write_all(&self.buffer[..p]);
         }
 
         // update ssthresh
@@ -720,7 +715,7 @@ impl<W: Write> KCP<W> {
     // update state (call it repeatedly, every 10ms-100ms), or you can ask
     // `check` when to call it again (without `input`/`send` calling).
     // `current` - current timestamp in millisec.
-    pub fn update(&mut self, current: u32) {
+    pub fn update<W: Write>(&mut self, current: u32, output: &mut W) {
         self.current = current;
         if !self.updated {
             self.updated = true;
@@ -738,7 +733,7 @@ impl<W: Write> KCP<W> {
             if timediff(self.current, self.ts_flush) >= 0 {
                 self.ts_flush = self.current + self.interval;
             }
-            self.flush();
+            self.flush(output);
         }
     }
 
