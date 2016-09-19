@@ -9,14 +9,14 @@ mod kcp;
 
 use std::io;
 use std::net::{SocketAddr, Shutdown};
+use std::str;
 
-use futures::Async;
+use futures::{Future, failed, Async};
 use tokio_core::io::IoFuture;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Handle, PollEvented};
 
 use std::io::Write;
-use std::sync::{Arc, Mutex};
 
 struct KcpTunnel {
     socket: UdpSocket,
@@ -39,8 +39,8 @@ impl Write for KcpTunnel {
 }
 
 pub struct KcpStream {
-    io: PollEvented<u8>,
-    addr: SocketAddr,
+    io: UdpSocket,
+    kcp: KCP,
 }
 
 pub struct KcpStreamNew {
@@ -54,17 +54,22 @@ enum KcpStreamConnect {
 
 impl KcpStream {
     pub fn connect(addr: &SocketAddr, handle: &Handle) -> KcpStreamNew {
-        unimplemented!()
+        let any = str::FromStr::from_str("0.0.0.0:0").unwrap();
+        let future = match UdpSocket::bind(&any, handle) {
+            Ok(udp) => KcpStream::new(udp, addr, handle),
+            Err(e) => failed(e).boxed(),
+        };
+        KcpStreamNew { inner: future }
     }
 
     fn new(socket: UdpSocket, addr: &SocketAddr, handle: &Handle) -> IoFuture<KcpStream> {
         let conv = rand::random::<u32>();
-        let tunnel = Arc::new(Mutex::new(KcpTunnel {
-            socket: socket,
-            addr: *addr,
-        }));
-
-        unimplemented!()
+        let kcp = KCP::new(conv);
+        KcpStreamConnect::Waiting(KcpStream {
+                io: socket,
+                kcp: kcp,
+            })
+            .boxed()
     }
 
     pub fn connect_stream(// stream: net::TcpStream,
@@ -115,6 +120,15 @@ impl KcpStream {
     }
 
     pub fn ttl(&self) -> io::Result<u32> {
+        unimplemented!()
+    }
+}
+
+impl Future for KcpStreamConnect {
+    type Item = KcpStream;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> futures::Poll<KcpStream, io::Error> {
         unimplemented!()
     }
 }
