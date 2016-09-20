@@ -7,16 +7,14 @@ pub use kcp::KCP;
 
 mod kcp;
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, Shutdown};
 use std::str;
 
-use futures::{Future, failed, Async};
-use tokio_core::io::IoFuture;
+use futures::{Future, failed, Poll, Async};
+use tokio_core::io::{Io, IoFuture};
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Handle, PollEvented};
-
-use std::io::Write;
 
 struct KcpTunnel {
     socket: UdpSocket,
@@ -41,6 +39,7 @@ impl Write for KcpTunnel {
 pub struct KcpStream {
     io: UdpSocket,
     kcp: KCP,
+    peer_addr: SocketAddr,
 }
 
 pub struct KcpStreamNew {
@@ -68,6 +67,7 @@ impl KcpStream {
         KcpStreamConnect::Waiting(KcpStream {
                 io: socket,
                 kcp: kcp,
+                peer_addr: *addr,
             })
             .boxed()
     }
@@ -80,19 +80,19 @@ impl KcpStream {
     }
 
     pub fn poll_read(&self) -> Async<()> {
-        unimplemented!()
+        self.io.poll_read()
     }
 
     pub fn poll_write(&self) -> Async<()> {
-        unimplemented!()
+        self.io.poll_write()
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        unimplemented!()
+        self.io.local_addr()
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        unimplemented!()
+        Ok(self.peer_addr)
     }
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -116,11 +116,77 @@ impl KcpStream {
     }
 
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
-        unimplemented!()
+        self.io.set_ttl(ttl)
     }
 
     pub fn ttl(&self) -> io::Result<u32> {
+        self.io.ttl()
+    }
+}
+
+impl Read for KcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // self.io.read(buf)
         unimplemented!()
+    }
+}
+
+impl Write for KcpStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // self.io.write(buf)
+        unimplemented!()
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        // self.io.flush()
+        unimplemented!()
+    }
+}
+
+impl Io for KcpStream {
+    fn poll_read(&mut self) -> Async<()> {
+        <KcpStream>::poll_read(self)
+    }
+
+    fn poll_write(&mut self) -> Async<()> {
+        <KcpStream>::poll_write(self)
+    }
+}
+
+impl<'a> Read for &'a KcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // (&self.io).read(buf)
+        unimplemented!()
+    }
+}
+
+impl<'a> Write for &'a KcpStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // (&self.io).write(buf)
+        unimplemented!()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // (&self.io).flush()
+        unimplemented!()
+    }
+}
+
+impl<'a> Io for &'a KcpStream {
+    fn poll_read(&mut self) -> Async<()> {
+        <KcpStream>::poll_read(self)
+    }
+
+    fn poll_write(&mut self) -> Async<()> {
+        <KcpStream>::poll_write(self)
+    }
+}
+
+impl Future for KcpStreamNew {
+    type Item = KcpStream;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<KcpStream, io::Error> {
+        self.inner.poll()
     }
 }
 
