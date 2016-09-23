@@ -2,6 +2,7 @@ extern crate futures;
 extern crate rand;
 #[macro_use]
 extern crate tokio_core;
+extern crate time;
 
 pub use kcp::KCP;
 
@@ -15,6 +16,12 @@ use futures::{Future, failed, Poll, Async};
 use tokio_core::io::{Io, IoFuture};
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Handle, PollEvented};
+
+fn clock() -> u32 {
+    let timespec = time::get_time();
+    let mills = timespec.sec * 1000 + timespec.nsec as i64 / 1000 / 1000;
+    mills as u32
+}
 
 struct KcpTunnel {
     socket: UdpSocket,
