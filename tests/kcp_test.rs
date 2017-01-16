@@ -4,6 +4,8 @@ extern crate rand;
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+use std::iter::Iterator;
+use std::mem;
 use std::thread;
 use std::time;
 
@@ -64,14 +66,16 @@ impl Write for LatencySimulator {
             return Err(io::Error::new(io::ErrorKind::Other,
                                       format!("exceeded nmax: {}", self.delay_tunnel.len())));
         }
-        let mut pkt = DelayPacket::new();
+
         self.current = clock();
         let mut delay = self.rtt_min;
         if self.rtt_max > self.rtt_min {
             delay += rand::random::<u32>() % (self.rtt_max - self.rtt_min);
         }
-        pkt.ts = self.current + delay;
-        pkt.data.extend_from_slice(buf);
+        let pkt = DelayPacket {
+            ts: self.current + delay,
+            data: buf.to_vec(),
+        };
         self.delay_tunnel.push_back(pkt);
 
         Ok(buf.len())
@@ -109,17 +113,14 @@ impl Read for LatencySimulator {
 
 #[test]
 fn kcp_test() {
-    let mut results: Vec<String> = Vec::new();
-    results.push(test("default"));
-    results.push(test("normal"));
-    results.push(test("fast"));
+    let tests = vec!["default", "normal", "fast"];
+    let results = tests.into_iter().map(|t| test(t)).collect::<Vec<_>>();
     for result in results {
         println!("{}", result);
     }
 }
 
 fn test(mode: &str) -> String {
-
     let mut alice_to_bob = LatencySimulator::new(10, 60, 125, 1000);
     let mut bob_to_alice = LatencySimulator::new(10, 60, 125, 1000);
 
@@ -168,7 +169,7 @@ fn test(mode: &str) -> String {
             encode32u(&mut buffer[..], &mut p, index);
             index += 1;
             encode32u(&mut buffer[..], &mut p, current);
-            alice.send(&buffer[..8]).unwrap();
+            alice.send(&buffer[..p]).unwrap();
             slap += 20;
         }
 
@@ -210,6 +211,7 @@ fn test(mode: &str) -> String {
                         println!("ERROR sn {}<->{}", count, next);
                         return "err".to_string();
                     }
+
                     next += 1;
                     sumrtt += rtt as i64;
                     count += 1;
@@ -217,6 +219,7 @@ fn test(mode: &str) -> String {
                         maxrtt = rtt;
                     }
                     println!("[RECV] mode={} sn={} rtt={}", mode, sn, rtt);
+
                     if next > 1000 {
                         break 'outer;
                     }
@@ -228,13 +231,43 @@ fn test(mode: &str) -> String {
 
     ts1 = clock() - ts1;
     format!("{} mode result ({}ms):\n", mode, ts1) +
-    &format!("avgrtt={} maxrtt={}", sumrtt / count, maxrtt)
+        &format!("avgrtt={} maxrtt={}", sumrtt / count, maxrtt)
+}
+
+#[test]
+fn test_decode32u() {
+    let mut buf = vec![0u8; 16];
+    let mut p = 0;
+
+    let n = decode32u(&buf, &mut p);
+    assert_eq!(0, n);
+    assert_eq!(4, p);
+
+    buf[4] = 7;
+    let n = decode32u(&buf, &mut p);
+    assert_eq!(7, n);
+    assert_eq!(8, p);
+
+    buf[8..12].copy_from_slice(&[13u8, 1, 0, 0]);
+    let n = decode32u(&buf, &mut p);
+    assert_eq!(256 + 13, n);
+    assert_eq!(12, p);
+}
+
+#[test]
+fn test_encode32u() {
+    let mut buf = vec![0u8; 4];
+    let mut p = 0;
+    encode32u(&mut buf, &mut p, 256 + 13);
+
+    assert_eq!(vec![13, 1, 0, 0], buf);
+    assert_eq!(4, p);
 }
 
 #[inline]
 fn decode32u(buf: &[u8], p: &mut usize) -> u32 {
-    let n = (buf[*p] as u32) | (buf[*p + 1] as u32) << 8 | (buf[*p + 2] as u32) << 16 |
-            (buf[*p + 3] as u32) << 24;
+    let buf = &buf[*p..];
+    let n: u32 = unsafe { mem::transmute([buf[0], buf[1], buf[2], buf[3]]) };
     *p += 4;
     u32::from_le(n)
 }
@@ -242,10 +275,9 @@ fn decode32u(buf: &[u8], p: &mut usize) -> u32 {
 #[inline]
 fn encode32u(buf: &mut [u8], p: &mut usize, n: u32) {
     let n = n.to_le();
-    buf[*p] = n as u8;
-    buf[*p + 1] = (n >> 8) as u8;
-    buf[*p + 2] = (n >> 16) as u8;
-    buf[*p + 3] = (n >> 24) as u8;
+    let data: [u8; 4] = unsafe { mem::transmute(n) };
+    let buf = &mut buf[*p..];
+    buf[..data.len()].copy_from_slice(&data);
     *p += 4;
 }
 
@@ -256,12 +288,10 @@ struct Random {
 
 impl Random {
     fn new(n: usize) -> Random {
-        let mut r = Random {
+        Random {
             size: 0,
-            seeds: Vec::new(),
-        };
-        r.seeds.resize(n, 0);
-        r
+            seeds: vec![0; n],
+        }
     }
 
     fn uniform(&mut self) -> u32 {
@@ -269,8 +299,8 @@ impl Random {
             return 0;
         }
         if self.size == 0 {
-            for i in 0..self.seeds.len() {
-                self.seeds[i] = i as u32;
+            for (i, e) in self.seeds.iter_mut().enumerate() {
+                *e = i as u32;
             }
             self.size = self.seeds.len();
         }
