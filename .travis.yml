@@ -4,4 +4,4 @@ rust:
   - nightly
 
 script:
-  - cargo test -- --nocapture
+  - make test

@@ -7,7 +7,7 @@ A KCP implementation in Rust
 ## Testing
 I use Rust nightly, stable version should work too.
 ```
-$ cargo test --release -- --nocapture
+$ make test
 
 # results:
 default mode result (27879ms):
