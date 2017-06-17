@@ -12,6 +12,7 @@ extern crate futures;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate bytes;
+extern crate kcp;
 
 use std::env;
 use std::io::{self, Read, Write};
@@ -21,10 +22,10 @@ use std::thread;
 use bytes::{BufMut, BytesMut};
 use futures::sync::mpsc;
 use futures::{Sink, Future, Stream};
-use tokio_core::net::TcpStream;
 use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
 use tokio_io::codec::{Encoder, Decoder};
+use kcp::KcpStream;
 
 fn main() {
     // Parse what address we're going to connect to
@@ -36,7 +37,7 @@ fn main() {
     // Create the event loop and initiate the connection to the remote server
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    let tcp = TcpStream::connect(&addr, &handle);
+    let kcp = KcpStream::connect(&addr, &handle);
 
     // Right now Tokio doesn't support a handle to stdin running on the event
     // loop, so we farm out that work to a separate thread. This thread will
@@ -63,7 +64,7 @@ fn main() {
     // finishes. If we don't have any more data to read or we won't receive any
     // more work from the remote then we can exit.
     let mut stdout = io::stdout();
-    let client = tcp.and_then(|stream| {
+    let client = kcp.and_then(|stream| {
         let (sink, stream) = stream.framed(Bytes).split();
         let send_stdin = stdin_rx.forward(sink);
         let write_stdout = stream.for_each(move |buf| stdout.write_all(&buf));

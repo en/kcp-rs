@@ -20,6 +20,7 @@
 extern crate futures;
 extern crate tokio_core;
 extern crate tokio_io;
+extern crate kcp;
 
 use std::env;
 use std::net::SocketAddr;
@@ -28,8 +29,8 @@ use futures::Future;
 use futures::stream::Stream;
 use tokio_io::AsyncRead;
 use tokio_io::io::copy;
-use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
+use kcp::KcpListener;
 
 fn main() {
     // Allow passing an address to listen on as the first argument of this
@@ -55,7 +56,7 @@ fn main() {
     // above and must be associated with an event loop, so we pass in a handle
     // to our event loop. After the socket's created we inform that we're ready
     // to go and start accepting connections.
-    let socket = TcpListener::bind(&addr, &handle).unwrap();
+    let socket = KcpListener::bind(&addr, &handle).unwrap();
     println!("Listening on: {}", addr);
 
     // Here we convert the `TcpListener` to a stream of incoming connections
