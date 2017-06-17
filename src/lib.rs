@@ -72,17 +72,17 @@ impl KcpStream {
         let conv = rand::random::<u32>();
         let kcp = KCP::new(conv);
         KcpStreamConnect::Waiting(KcpStream {
-                io: socket,
-                kcp: kcp,
-                peer_addr: *addr,
-            })
-            .boxed()
+            io: socket,
+            kcp: kcp,
+            peer_addr: *addr,
+        }).boxed()
     }
 
-    pub fn connect_stream(// stream: net::TcpStream,
-                          addr: &SocketAddr,
-                          handle: &Handle)
-                          -> IoFuture<KcpStream> {
+    pub fn connect_stream(
+        // stream: net::TcpStream,
+        addr: &SocketAddr,
+        handle: &Handle,
+    ) -> IoFuture<KcpStream> {
         unimplemented!()
     }
 

@@ -63,8 +63,10 @@ impl Write for LatencySimulator {
             return Err(io::Error::new(io::ErrorKind::Other, "lost"));
         }
         if self.delay_tunnel.len() >= self.nmax as usize {
-            return Err(io::Error::new(io::ErrorKind::Other,
-                                      format!("exceeded nmax: {}", self.delay_tunnel.len())));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("exceeded nmax: {}", self.delay_tunnel.len()),
+            ));
         }
 
         self.current = clock();
@@ -92,13 +94,17 @@ impl Read for LatencySimulator {
         if let Some(pkt) = self.delay_tunnel.front() {
             self.current = clock();
             if self.current < pkt.ts {
-                return Err(io::Error::new(io::ErrorKind::Other,
-                                          format!("current({}) < ts({})", self.current, pkt.ts)));
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("current({}) < ts({})", self.current, pkt.ts),
+                ));
             }
             len = pkt.data.len();
             if len > buf.len() {
-                return Err(io::Error::new(io::ErrorKind::Other,
-                                          format!("buf_size({}) < pkt_size({})", buf.len(), len)));
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("buf_size({}) < pkt_size({})", buf.len(), len),
+                ));
             }
             let buf = &mut buf[..len];
             buf.copy_from_slice(&pkt.data[..]);

@@ -2,16 +2,16 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::io::{self, Error, ErrorKind, Write};
 
-const KCP_RTO_NDL: u32 = 30;		// no delay min rto
-const KCP_RTO_MIN: u32 = 100;		// normal min rto
+const KCP_RTO_NDL: u32 = 30; // no delay min rto
+const KCP_RTO_MIN: u32 = 100; // normal min rto
 const KCP_RTO_DEF: u32 = 200;
 const KCP_RTO_MAX: u32 = 60000;
-const KCP_CMD_PUSH: u32 = 81;		// cmd: push data
-const KCP_CMD_ACK: u32 = 82;		// cmd: ack
-const KCP_CMD_WASK: u32 = 83;		// cmd: window probe (ask)
-const KCP_CMD_WINS: u32 = 84;		// cmd: window size (tell)
-const KCP_ASK_SEND: u32 = 1;		// need to send KCP_CMD_WASK
-const KCP_ASK_TELL: u32 = 2;		// need to send KCP_CMD_WINS
+const KCP_CMD_PUSH: u32 = 81; // cmd: push data
+const KCP_CMD_ACK: u32 = 82; // cmd: ack
+const KCP_CMD_WASK: u32 = 83; // cmd: window probe (ask)
+const KCP_CMD_WINS: u32 = 84; // cmd: window size (tell)
+const KCP_ASK_SEND: u32 = 1; // need to send KCP_CMD_WASK
+const KCP_ASK_TELL: u32 = 2; // need to send KCP_CMD_WINS
 const KCP_WND_SND: u32 = 32;
 const KCP_WND_RCV: u32 = 32;
 const KCP_MTU_DEF: u32 = 1400;
@@ -21,8 +21,8 @@ const KCP_OVERHEAD: u32 = 24;
 // const KCP_DEADLINK: u32 = 20; // never used
 const KCP_THRESH_INIT: u32 = 2;
 const KCP_THRESH_MIN: u32 = 2;
-const KCP_PROBE_INIT: u32 = 7000;		// 7 secs to probe window size
-const KCP_PROBE_LIMIT: u32 = 120000;	// up to 120 secs to probe window
+const KCP_PROBE_INIT: u32 = 7000; // 7 secs to probe window size
+const KCP_PROBE_LIMIT: u32 = 120000; // up to 120 secs to probe window
 
 #[derive(Default)]
 struct Segment {
@@ -42,7 +42,10 @@ struct Segment {
 
 impl Segment {
     fn new(size: usize) -> Segment {
-        Segment { data: Vec::with_capacity(size), ..Default::default() }
+        Segment {
+            data: Vec::with_capacity(size),
+            ..Default::default()
+        }
     }
 }
 
@@ -139,7 +142,10 @@ impl KCP {
             ts_flush: KCP_INTERVAL,
             ssthresh: KCP_THRESH_INIT, // dead_link: KCP_DEADLINK,
         };
-        kcp.buffer.resize(((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize, 0);
+        kcp.buffer.resize(
+            ((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize,
+            0,
+        );
         kcp
     }
 
@@ -432,7 +438,8 @@ impl KCP {
 
             let cmd = cmd as u32;
             if cmd != KCP_CMD_PUSH && cmd != KCP_CMD_ACK && cmd != KCP_CMD_WASK &&
-               cmd != KCP_CMD_WINS {
+                cmd != KCP_CMD_WINS
+            {
                 return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
             }
 
@@ -876,7 +883,7 @@ fn encode32u(buf: &mut [u8], p: &mut usize, n: u32) {
 #[inline]
 fn decode32u(buf: &[u8], p: &mut usize) -> u32 {
     let n = (buf[*p] as u32) | (buf[*p + 1] as u32) << 8 | (buf[*p + 2] as u32) << 16 |
-            (buf[*p + 3] as u32) << 24;
+        (buf[*p + 3] as u32) << 24;
     *p += 4;
     u32::from_le(n)
 }
