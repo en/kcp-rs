@@ -66,13 +66,12 @@ fn main() {
     let client = tcp.and_then(|stream| {
         let (sink, stream) = stream.framed(Bytes).split();
         let send_stdin = stdin_rx.forward(sink);
-        let write_stdout = stream.for_each(move |buf| {
-            stdout.write_all(&buf)
-        });
+        let write_stdout = stream.for_each(move |buf| stdout.write_all(&buf));
 
-        send_stdin.map(|_| ())
-                  .select(write_stdout.map(|_| ()))
-                  .then(|_| Ok(()))
+        send_stdin
+            .map(|_| ())
+            .select(write_stdout.map(|_| ()))
+            .then(|_| Ok(()))
     });
 
     // And now that we've got our client, we execute it in the event loop!
@@ -122,8 +121,7 @@ fn read_stdin(mut tx: mpsc::Sender<Vec<u8>>) {
     loop {
         let mut buf = vec![0; 1024];
         let n = match stdin.read(&mut buf) {
-            Err(_) |
-            Ok(0) => break,
+            Err(_) | Ok(0) => break,
             Ok(n) => n,
         };
         buf.truncate(n);
