@@ -285,7 +285,7 @@ impl KCP {
             p += size;
             n -= size;
         }
-        Ok(count)
+        Ok(p)
     }
 
     fn update_ack(&mut self, rtt: u32) {
@@ -515,7 +515,7 @@ impl KCP {
                 }
             }
         }
-        Ok(0)
+        Ok(p)
     }
 
     fn wnd_unused(&self) -> u32 {

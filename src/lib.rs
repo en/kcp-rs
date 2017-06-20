@@ -2,40 +2,183 @@ extern crate futures;
 extern crate rand;
 #[macro_use]
 extern crate tokio_core;
+extern crate tokio_io;
 extern crate time;
+extern crate byteorder;
+extern crate bytes;
+extern crate time as ctime;
+extern crate mio;
 
 pub use kcp::KCP;
 
 mod kcp;
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, Shutdown};
+use std::net::{SocketAddr, IpAddr, Shutdown, Ipv4Addr};
 use std::str;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::Duration;
+use std::sync::Arc;
 
-use futures::{Future, failed, Poll, Async};
-use tokio_core::io::{Io, IoFuture};
+use bytes::{Buf, BufMut};
+use futures::{Poll, Async, Future};
+use futures::stream::Stream;
 use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Handle, PollEvented};
+use tokio_core::reactor::{Handle, PollEvented, Interval, Remote};
+use tokio_io::{AsyncRead, AsyncWrite};
+use byteorder::{ByteOrder, LittleEndian};
+use mio::{Ready, Registration, PollOpt, Token, SetReadiness};
+use mio::event::Evented;
 
-fn clock() -> u32 {
-    let timespec = time::get_time();
-    let mills = timespec.sec * 1000 + timespec.nsec as i64 / 1000 / 1000;
-    mills as u32
+struct KcpPair {
+    k: Arc<RefCell<KCP>>,
+    set_readiness: SetReadiness,
 }
 
-struct KcpTunnel {
-    socket: UdpSocket,
-    addr: SocketAddr,
+pub struct KcpListener {
+    udp: Arc<UdpSocket>,
+    connections: HashMap<SocketAddr, KcpPair>,
+    handle: Remote,
 }
 
-impl Write for KcpTunnel {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.socket.send_to(buf, &self.addr).unwrap();
-        if n == buf.len() {
-            Ok(n)
-        } else {
-            Err(io::Error::new(io::ErrorKind::WouldBlock, "failed to send"))
+pub struct Incoming {
+    inner: KcpListener,
+}
+
+impl KcpListener {
+    pub fn bind(addr: &SocketAddr, handle: &Handle) -> io::Result<KcpListener> {
+        let udp = UdpSocket::bind(addr, handle).unwrap();
+        let listener = KcpListener {
+            udp: Arc::new(udp),
+            connections: HashMap::new(),
+            handle: handle.remote().clone(),
+        };
+        Ok(listener)
+    }
+
+    pub fn accept(&mut self) -> io::Result<(KcpStream, SocketAddr)> {
+        let mut buf = vec![0; 1024];
+        loop {
+            match self.udp.recv_from(&mut buf) {
+                Err(e) => {
+                    return Err(e);
+                }
+                Ok((n, addr)) => {
+                    if self.connections.contains_key(&addr) {
+                        if let Some(kp) = self.connections.get(&addr) {
+                            let data = Vec::from(&buf[..n]);
+                            let mut kcp = kp.k.borrow_mut();
+                            kcp.input(&buf[..n]);
+                            kp.set_readiness.set_readiness(mio::Ready::readable());
+                        }
+                    } else {
+                        let conv = LittleEndian::read_u32(&buf[..4]);
+                        let dur = Duration::from_millis(10);
+                        let mut kcp = KCP::new(conv);
+                        kcp.wndsize(128, 128);
+                        kcp.nodelay(0, 10, 0, true);
+                        let kcp = Arc::new(RefCell::new(kcp));
+                        let (registration, set_readiness) = Registration::new2();
+                        let core = KcpCore {
+                            kcp: kcp.clone(),
+                            udp: self.udp.clone(),
+                            peer: addr.clone(),
+                            registration: registration,
+                            set_readiness: set_readiness.clone(),
+                        };
+                        let io = PollEvented::new(core, &self.handle.handle().unwrap()).unwrap();
+                        let stream = KcpStream { io: io };
+                        stream.foo(&self.handle, kcp.clone());
+                        stream.io.get_ref().kcp.borrow_mut().input(&buf[..n]);
+                        stream.io.get_ref().set_readiness.set_readiness(
+                            mio::Ready::readable(),
+                        );
+                        let kp = KcpPair {
+                            k: kcp.clone(),
+                            set_readiness: set_readiness.clone(),
+                        };
+                        self.connections.insert(addr, kp);
+                        return Ok((stream, addr));
+                    }
+                }
+            }
         }
+    }
+
+    pub fn incoming(self) -> Incoming {
+        Incoming { inner: self }
+    }
+}
+
+impl Stream for Incoming {
+    type Item = (KcpStream, SocketAddr);
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, io::Error> {
+        Ok(Async::Ready(Some(try_nb!(self.inner.accept()))))
+    }
+}
+
+struct Server {
+    socket: Arc<UdpSocket>,
+    buf: Vec<u8>,
+    to_send: Option<(usize, SocketAddr)>,
+    kcp: Arc<RefCell<KCP>>,
+    set_readiness: SetReadiness,
+}
+
+impl Future for Server {
+    type Item = ();
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<(), io::Error> {
+        loop {
+            if let Some((size, peer)) = self.to_send {
+                self.kcp.borrow_mut().input(&self.buf[..size]);
+                self.set_readiness.set_readiness(mio::Ready::readable());
+                self.to_send = None;
+            }
+
+            self.to_send = Some(try_nb!(self.socket.recv_from(&mut self.buf)));
+        }
+    }
+}
+
+pub struct KcpStreamNew {
+    inner: Option<KcpStream>,
+}
+
+impl Future for KcpStreamNew {
+    type Item = KcpStream;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<KcpStream, io::Error> {
+        Ok(Async::Ready(self.inner.take().unwrap()))
+    }
+}
+
+struct KcpCore {
+    kcp: Arc<RefCell<KCP>>,
+    udp: Arc<UdpSocket>,
+    peer: SocketAddr,
+    registration: Registration,
+    set_readiness: SetReadiness,
+}
+
+impl Read for KcpCore {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let result = self.kcp.borrow_mut().recv(buf);
+        match result {
+            Err(e) => Err(io::Error::new(io::ErrorKind::WouldBlock, "would block")),
+            Ok(n) => Ok(n),
+        }
+    }
+}
+
+impl Write for KcpCore {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.kcp.borrow_mut().send(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -43,47 +186,97 @@ impl Write for KcpTunnel {
     }
 }
 
+impl Evented for KcpCore {
+    fn register(
+        &self,
+        poll: &mio::Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
+        self.registration.register(poll, token, interest, opts)
+    }
+
+    fn reregister(
+        &self,
+        poll: &mio::Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
+        self.registration.reregister(poll, token, interest, opts)
+    }
+
+    fn deregister(&self, poll: &mio::Poll) -> io::Result<()> {
+        self.registration.deregister(poll)
+    }
+}
+
 pub struct KcpStream {
-    io: UdpSocket,
-    kcp: KCP,
-    peer_addr: SocketAddr,
-}
-
-pub struct KcpStreamNew {
-    inner: IoFuture<KcpStream>,
-}
-
-enum KcpStreamConnect {
-    Waiting(KcpStream),
-    Empty,
+    io: PollEvented<KcpCore>,
 }
 
 impl KcpStream {
     pub fn connect(addr: &SocketAddr, handle: &Handle) -> KcpStreamNew {
-        let any = str::FromStr::from_str("0.0.0.0:0").unwrap();
-        let future = match UdpSocket::bind(&any, handle) {
-            Ok(udp) => KcpStream::new(udp, addr, handle),
-            Err(e) => failed(e).boxed(),
-        };
-        KcpStreamNew { inner: future }
-    }
-
-    fn new(socket: UdpSocket, addr: &SocketAddr, handle: &Handle) -> IoFuture<KcpStream> {
+        let dur = Duration::from_millis(10);
         let conv = rand::random::<u32>();
-        let kcp = KCP::new(conv);
-        KcpStreamConnect::Waiting(KcpStream {
-            io: socket,
-            kcp: kcp,
-            peer_addr: *addr,
-        }).boxed()
+        let mut kcp = KCP::new(conv);
+        kcp.wndsize(128, 128);
+        kcp.nodelay(0, 10, 0, true);
+        let kcp = Arc::new(RefCell::new(kcp));
+        let r: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let udp = UdpSocket::bind(&r, handle).unwrap();
+        let udp = Arc::new(udp);
+        let (registration, set_readiness) = Registration::new2();
+        let core = KcpCore {
+            kcp: kcp.clone(),
+            udp: udp.clone(),
+            peer: addr.clone(),
+            registration: registration,
+            set_readiness: set_readiness.clone(),
+        };
+        let io = PollEvented::new(core, handle).unwrap();
+        let inner = KcpStream { io: io };
+        inner.bar(handle, kcp.clone());
+        handle.spawn(
+            Server {
+                socket: udp.clone(),
+                buf: vec![0; 1024],
+                to_send: None,
+                kcp: kcp.clone(),
+                set_readiness: set_readiness.clone(),
+            }.then(|_| Ok(())),
+        );
+        KcpStreamNew { inner: Some(inner) }
     }
 
-    pub fn connect_stream(
-        // stream: net::TcpStream,
-        addr: &SocketAddr,
-        handle: &Handle,
-    ) -> IoFuture<KcpStream> {
-        unimplemented!()
+    pub fn bar(&self, handle: &Handle, kcp: Arc<RefCell<KCP>>) {
+        let dur = Duration::from_millis(10);
+        let interval = Interval::new(dur, handle).unwrap();
+        let mut output = KcpOutput {
+            udp: self.io.get_ref().udp.clone(),
+            peer: self.io.get_ref().peer.clone(),
+        };
+        let updater = interval.for_each(move |()| {
+                            kcp.borrow_mut().update(clock(), &mut output);
+                            Ok(())
+                        });
+        handle.spawn(updater.then(|_| Ok(())));
+    }
+
+    pub fn foo(&self, handle: &Remote, kcp: Arc<RefCell<KCP>>) {
+        let dur = Duration::from_millis(10);
+        let h = handle.handle().unwrap();
+        let interval = Interval::new(dur, &h).unwrap();
+        let mut output = KcpOutput {
+            udp: self.io.get_ref().udp.clone(),
+            peer: self.io.get_ref().peer.clone(),
+        };
+        let updater = interval.for_each(move |()| {
+                            kcp.borrow_mut().update(clock(), &mut output);
+                            Ok(())
+                        });
+        handle.handle().unwrap().spawn(updater.then(|_| Ok(())));
     }
 
     pub fn poll_read(&self) -> Async<()> {
@@ -94,114 +287,103 @@ impl KcpStream {
         self.io.poll_write()
     }
 
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.io.local_addr()
-    }
-
-    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        Ok(self.peer_addr)
-    }
-
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         unimplemented!()
-    }
-
-    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        unimplemented!()
-    }
-
-    pub fn nodelay(&self) -> io::Result<bool> {
-        unimplemented!()
-    }
-
-    pub fn set_keepalive_ms(&self, keepalive: Option<u32>) -> io::Result<()> {
-        unimplemented!()
-    }
-
-    pub fn keepalive_ms(&self) -> io::Result<Option<u32>> {
-        unimplemented!()
-    }
-
-    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
-        self.io.set_ttl(ttl)
-    }
-
-    pub fn ttl(&self) -> io::Result<u32> {
-        self.io.ttl()
     }
 }
 
 impl Read for KcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // self.io.read(buf)
-        unimplemented!()
+        self.io.read(buf)
     }
 }
 
 impl Write for KcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // self.io.write(buf)
-        unimplemented!()
+        self.io.get_ref().set_readiness.set_readiness(
+            mio::Ready::writable(),
+        );
+        self.io.write(buf)
     }
     fn flush(&mut self) -> io::Result<()> {
-        // self.io.flush()
-        unimplemented!()
+        self.io.flush()
     }
 }
 
-impl Io for KcpStream {
-    fn poll_read(&mut self) -> Async<()> {
-        <KcpStream>::poll_read(self)
+impl AsyncRead for KcpStream {
+    unsafe fn prepare_uninitialized_buffer(&self, _: &mut [u8]) -> bool {
+        false
     }
 
-    fn poll_write(&mut self) -> Async<()> {
-        <KcpStream>::poll_write(self)
+    fn read_buf<B: BufMut>(&mut self, buf: &mut B) -> Poll<usize, io::Error> {
+        <&KcpStream>::read_buf(&mut &*self, buf)
+    }
+}
+
+impl AsyncWrite for KcpStream {
+    fn shutdown(&mut self) -> Poll<(), io::Error> {
+        <&KcpStream>::shutdown(&mut &*self)
+    }
+
+    fn write_buf<B: Buf>(&mut self, buf: &mut B) -> Poll<usize, io::Error> {
+        <&KcpStream>::write_buf(&mut &*self, buf)
     }
 }
 
 impl<'a> Read for &'a KcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // (&self.io).read(buf)
-        unimplemented!()
+        Ok(0)
     }
 }
 
 impl<'a> Write for &'a KcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // (&self.io).write(buf)
-        unimplemented!()
+        Ok(0)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // (&self.io).flush()
-        unimplemented!()
+        Ok(())
     }
 }
 
-impl<'a> Io for &'a KcpStream {
-    fn poll_read(&mut self) -> Async<()> {
-        <KcpStream>::poll_read(self)
+impl<'a> AsyncRead for &'a KcpStream {
+    unsafe fn prepare_uninitialized_buffer(&self, _: &mut [u8]) -> bool {
+        false
     }
 
-    fn poll_write(&mut self) -> Async<()> {
-        <KcpStream>::poll_write(self)
-    }
-}
-
-impl Future for KcpStreamNew {
-    type Item = KcpStream;
-    type Error = io::Error;
-
-    fn poll(&mut self) -> Poll<KcpStream, io::Error> {
-        self.inner.poll()
+    fn read_buf<B: BufMut>(&mut self, buf: &mut B) -> Poll<usize, io::Error> {
+        Ok(Async::NotReady)
     }
 }
 
-impl Future for KcpStreamConnect {
-    type Item = KcpStream;
-    type Error = io::Error;
+impl<'a> AsyncWrite for &'a KcpStream {
+    fn shutdown(&mut self) -> Poll<(), io::Error> {
+        Ok(().into())
+    }
 
-    fn poll(&mut self) -> futures::Poll<KcpStream, io::Error> {
-        unimplemented!()
+    fn write_buf<B: Buf>(&mut self, buf: &mut B) -> Poll<usize, io::Error> {
+        Ok(Async::NotReady)
+    }
+}
+
+#[inline]
+fn clock() -> u32 {
+    let timespec = ctime::get_time();
+    let mills = timespec.sec * 1000 + timespec.nsec as i64 / 1000 / 1000;
+    mills as u32
+}
+
+pub struct KcpOutput {
+    udp: Arc<UdpSocket>,
+    peer: SocketAddr,
+}
+
+impl Write for KcpOutput {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.udp.send_to(buf, &self.peer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }

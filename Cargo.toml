@@ -4,7 +4,12 @@ version = "0.1.0"
 authors = ["Yuanchao Sun <yuanchao.sun@gmail.com>"]
 
 [dependencies]
-time = "0.1"
-rand = "0.3"
+byteorder = "1"
+bytes = "0.4"
+env_logger = { version = "0.3", default-features = false }
 futures = "0.1"
+mio = "0.6"
+rand = "0.3"
+time = "0.1"
 tokio-core = "0.1"
+tokio-io = "0.1"
