@@ -49,7 +49,7 @@ impl Segment {
     }
 }
 
-pub struct KCP {
+pub struct KCP<W: Write> {
     conv: u32,
     mtu: u32,
     mss: u32,
@@ -98,10 +98,12 @@ pub struct KCP {
     fastresend: u32,
     nocwnd: bool,
     stream: bool,
+
+    output: W,
 }
 
-impl KCP {
-    pub fn new(conv: u32) -> KCP {
+impl<W: Write> KCP<W> {
+    pub fn new(conv: u32, w: W) -> KCP<W> {
         let mut kcp = KCP {
             // state: 0,
             snd_una: 0,
@@ -141,6 +143,7 @@ impl KCP {
             interval: KCP_INTERVAL,
             ts_flush: KCP_INTERVAL,
             ssthresh: KCP_THRESH_INIT, // dead_link: KCP_DEADLINK,
+            output: w,
         };
         kcp.buffer.resize(
             ((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize,
@@ -526,7 +529,7 @@ impl KCP {
         0
     }
 
-    fn flush<W: Write>(&mut self, output: &mut W) {
+    pub fn flush(&mut self) {
         // `update` haven't been called.
         if !self.updated {
             return;
@@ -545,7 +548,7 @@ impl KCP {
         // flush acknowledges
         for ack in &self.acklist {
             if p as u32 + KCP_OVERHEAD > self.mtu {
-                output.write_all(&self.buffer[..p]);
+                self.output.write_all(&self.buffer[..p]);
                 p = 0;
             }
             seg.sn = ack.0;
@@ -581,7 +584,7 @@ impl KCP {
         if (self.probe & KCP_ASK_SEND) != 0 {
             seg.cmd = KCP_CMD_WASK;
             if p as u32 + KCP_OVERHEAD > self.mtu {
-                output.write_all(&self.buffer[..p]);
+                self.output.write_all(&self.buffer[..p]);
                 p = 0;
             }
             encode_seg(&mut self.buffer, &mut p, &seg);
@@ -591,7 +594,7 @@ impl KCP {
         if (self.probe & KCP_ASK_TELL) != 0 {
             seg.cmd = KCP_CMD_WINS;
             if p as u32 + KCP_OVERHEAD > self.mtu {
-                output.write_all(&self.buffer[..p]);
+                self.output.write_all(&self.buffer[..p]);
                 p = 0;
             }
             encode_seg(&mut self.buffer, &mut p, &seg);
@@ -671,7 +674,7 @@ impl KCP {
                 let need = KCP_OVERHEAD as usize + len;
 
                 if p + need > self.mtu as usize {
-                    output.write_all(&self.buffer[..p]);
+                    self.output.write_all(&self.buffer[..p]);
                     p = 0;
                 }
                 encode_seg(&mut self.buffer, &mut p, &segment);
@@ -690,7 +693,7 @@ impl KCP {
 
         // flash remain segments
         if p > 0 {
-            output.write_all(&self.buffer[..p]);
+            self.output.write_all(&self.buffer[..p]);
         }
 
         // update ssthresh
@@ -722,7 +725,7 @@ impl KCP {
     // update state (call it repeatedly, every 10ms-100ms), or you can ask
     // `check` when to call it again (without `input`/`send` calling).
     // `current` - current timestamp in millisec.
-    pub fn update<W: Write>(&mut self, current: u32, output: &mut W) {
+    pub fn update(&mut self, current: u32) {
         self.current = current;
         if !self.updated {
             self.updated = true;
@@ -740,7 +743,7 @@ impl KCP {
             if timediff(self.current, self.ts_flush) >= 0 {
                 self.ts_flush = self.current + self.interval;
             }
-            self.flush(output);
+            self.flush();
         }
     }
 
@@ -753,7 +756,7 @@ impl KCP {
     // or optimize `update` when handling massive kcp connections)
     pub fn check(&self, current: u32) -> u32 {
         if !self.updated {
-            return current;
+            return 0;
         }
 
         let mut ts_flush = self.ts_flush;
@@ -764,14 +767,14 @@ impl KCP {
         }
 
         if timediff(current, ts_flush) >= 0 {
-            return current;
+            return 0;
         }
 
         let tm_flush = timediff(ts_flush, current) as u32;
         for seg in &self.snd_buf {
             let diff = timediff(seg.resendts, current);
             if diff <= 0 {
-                return current;
+                return 0;
             }
             if (diff as u32) < tm_packet {
                 tm_packet = diff as u32;
@@ -780,7 +783,7 @@ impl KCP {
 
         let minimal = cmp::min(cmp::min(tm_packet, tm_flush), self.interval);
 
-        current + minimal
+        minimal
     }
 
     pub fn setmtu(&mut self, mtu: u32) -> bool {

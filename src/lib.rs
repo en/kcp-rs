@@ -19,14 +19,14 @@ use std::net::SocketAddr;
 use std::str;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::rc::Rc;
 
 use bytes::{Buf, BufMut};
 use futures::{Poll, Async, Future};
 use futures::stream::Stream;
 use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Handle, PollEvented, Interval};
+use tokio_core::reactor::{Handle, PollEvented, Timeout};
 use tokio_io::{AsyncRead, AsyncWrite};
 use byteorder::{ByteOrder, LittleEndian};
 use mio::{Ready, Registration, PollOpt, Token, SetReadiness};
@@ -34,8 +34,9 @@ use mio::event::Evented;
 use iovec::IoVec;
 
 struct KcpPair {
-    k: Rc<RefCell<KCP>>,
+    k: Rc<RefCell<KCP<KcpOutput>>>,
     set_readiness: SetReadiness,
+    token: Rc<RefCell<Timeout>>,
 }
 
 pub struct KcpListener {
@@ -71,32 +72,66 @@ impl KcpListener {
                         if let Some(kp) = self.connections.get(&addr) {
                             let mut kcp = kp.k.borrow_mut();
                             kcp.input(&buf[..n]);
+
+                            kcp.update(clock());
+                            let dur = kcp.check(clock());
+                            kp.token.borrow_mut().reset(
+                                Instant::now() +
+                                    Duration::from_millis(dur as u64),
+                            );
+
                             kp.set_readiness.set_readiness(mio::Ready::readable());
                         }
                     } else {
                         let conv = LittleEndian::read_u32(&buf[..4]);
-                        let mut kcp = KCP::new(conv);
+                        let mut kcp = KCP::new(
+                            conv,
+                            KcpOutput {
+                                udp: self.udp.clone(),
+                                peer: addr.clone(),
+                            },
+                        );
                         kcp.wndsize(128, 128);
                         kcp.nodelay(0, 10, 0, true);
                         let kcp = Rc::new(RefCell::new(kcp));
                         let (registration, set_readiness) = Registration::new2();
+                        let now = Instant::now();
+                        let token = Timeout::new_at(now, &self.handle).unwrap();
+                        let token = Rc::new(RefCell::new(token));
                         let core = KcpCore {
                             kcp: kcp.clone(),
-                            udp: self.udp.clone(),
-                            peer: addr.clone(),
                             registration: registration,
                             set_readiness: set_readiness.clone(),
+                            token: token.clone(),
                         };
-                        core.update(&self.handle);
+                        let interval = KcpInterval {
+                            kcp: kcp.clone(),
+                            token: token.clone(),
+                        };
+                        &self.handle.spawn(
+                            interval.for_each(|_| Ok(())).then(|_| Ok(())),
+                        );
                         let io = PollEvented::new(core, &self.handle).unwrap();
                         let stream = KcpStream { io: io };
                         stream.io.get_ref().kcp.borrow_mut().input(&buf[..n]);
+
+                        let kcpc = kcp.clone();
+                        let mut kcp1 = kcpc.borrow_mut();
+                        kcp1.update(clock());
+                        let dur = kcp1.check(clock());
+                        token.borrow_mut().reset(
+                            Instant::now() +
+                                Duration::from_millis(dur as u64),
+                        );
+
                         stream.io.get_ref().set_readiness.set_readiness(
                             mio::Ready::readable(),
                         );
+
                         let kp = KcpPair {
                             k: kcp.clone(),
                             set_readiness: set_readiness.clone(),
+                            token: token.clone(),
                         };
                         self.connections.insert(addr, kp);
                         return Ok((stream, addr));
@@ -124,8 +159,10 @@ struct Server {
     socket: Rc<UdpSocket>,
     buf: Vec<u8>,
     to_send: Option<(usize, SocketAddr)>,
-    kcp: Rc<RefCell<KCP>>,
+    kcp: Rc<RefCell<KCP<KcpOutput>>>,
     set_readiness: SetReadiness,
+
+    token: Rc<RefCell<Timeout>>,
 }
 
 impl Future for Server {
@@ -135,7 +172,16 @@ impl Future for Server {
     fn poll(&mut self) -> Poll<(), io::Error> {
         loop {
             if let Some((size, peer)) = self.to_send {
-                self.kcp.borrow_mut().input(&self.buf[..size]);
+                let mut kcp = self.kcp.borrow_mut();
+                kcp.input(&self.buf[..size]);
+
+                kcp.update(clock());
+                let dur = kcp.check(clock());
+                self.token.borrow_mut().reset(
+                    Instant::now() +
+                        Duration::from_millis(dur as u64),
+                );
+
                 self.set_readiness.set_readiness(mio::Ready::readable());
                 self.to_send = None;
             }
@@ -158,12 +204,37 @@ impl Future for KcpStreamNew {
     }
 }
 
+struct KcpInterval {
+    kcp: Rc<RefCell<KCP<KcpOutput>>>,
+    token: Rc<RefCell<Timeout>>,
+}
+
+impl Stream for KcpInterval {
+    type Item = ();
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<()>, io::Error> {
+        let mut token = self.token.borrow_mut();
+        match token.poll() {
+            Ok(Async::Ready(())) => {
+                let mut kcp = self.kcp.borrow_mut();
+                kcp.update(clock());
+                let dur = kcp.check(clock());
+                let next = Instant::now() + Duration::from_millis(dur as u64);
+                token.reset(next);
+                Ok(Async::Ready(Some(())))
+            }
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 struct KcpCore {
-    kcp: Rc<RefCell<KCP>>,
-    udp: Rc<UdpSocket>,
-    peer: SocketAddr,
+    kcp: Rc<RefCell<KCP<KcpOutput>>>,
     registration: Registration,
     set_readiness: SetReadiness,
+    token: Rc<RefCell<Timeout>>,
 }
 
 impl KcpCore {
@@ -173,21 +244,6 @@ impl KcpCore {
 
     pub fn write_bufs(&self, bufs: &[&IoVec]) -> io::Result<usize> {
         unimplemented!()
-    }
-
-    pub fn update(&self, handle: &Handle) {
-        let dur = Duration::from_millis(10);
-        let interval = Interval::new(dur, handle).unwrap();
-        let mut output = KcpOutput {
-            udp: self.udp.clone(),
-            peer: self.peer.clone(),
-        };
-        let kcp = self.kcp.clone();
-        let updater = interval.for_each(move |()| {
-                            kcp.borrow_mut().update(clock(), &mut output);
-                            Ok(())
-                        });
-        handle.spawn(updater.then(|_| Ok(())));
     }
 }
 
@@ -203,7 +259,16 @@ impl Read for KcpCore {
 
 impl Write for KcpCore {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.kcp.borrow_mut().send(buf)
+        let mut kcp = self.kcp.borrow_mut();
+        let result = kcp.send(buf);
+        kcp.update(clock());
+        let dur = kcp.check(clock());
+        kcp.flush();
+        self.token.borrow_mut().reset(
+            Instant::now() +
+                Duration::from_millis(dur as u64),
+        );
+        result
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -243,23 +308,36 @@ pub struct KcpStream {
 
 impl KcpStream {
     pub fn connect(addr: &SocketAddr, handle: &Handle) -> KcpStreamNew {
-        let conv = rand::random::<u32>();
-        let mut kcp = KCP::new(conv);
-        kcp.wndsize(128, 128);
-        kcp.nodelay(0, 10, 0, true);
-        let kcp = Rc::new(RefCell::new(kcp));
         let r: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let udp = UdpSocket::bind(&r, handle).unwrap();
         let udp = Rc::new(udp);
+        let conv = rand::random::<u32>();
+        let mut kcp = KCP::new(
+            conv,
+            KcpOutput {
+                udp: udp.clone(),
+                peer: addr.clone(),
+            },
+        );
+        kcp.wndsize(128, 128);
+        kcp.nodelay(0, 10, 0, true);
+        let kcp = Rc::new(RefCell::new(kcp));
         let (registration, set_readiness) = Registration::new2();
+        let now = Instant::now();
+        let token = Timeout::new_at(now, handle).unwrap();
+        let token = Rc::new(RefCell::new(token));
         let core = KcpCore {
             kcp: kcp.clone(),
-            udp: udp.clone(),
-            peer: addr.clone(),
             registration: registration,
             set_readiness: set_readiness.clone(),
+            token: token.clone(),
         };
-        core.update(handle);
+
+        let interval = KcpInterval {
+            kcp: kcp.clone(),
+            token: token.clone(),
+        };
+        handle.spawn(interval.for_each(|_| Ok(())).then(|_| Ok(())));
         let io = PollEvented::new(core, handle).unwrap();
         let inner = KcpStream { io: io };
         handle.spawn(
@@ -269,6 +347,7 @@ impl KcpStream {
                 to_send: None,
                 kcp: kcp.clone(),
                 set_readiness: set_readiness.clone(),
+                token: token.clone(),
             }.then(|_| Ok(())),
         );
         KcpStreamNew { inner: Some(inner) }
