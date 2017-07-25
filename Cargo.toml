@@ -12,6 +12,5 @@ iovec    = "0.1.0"
 mio = "0.6"
 rand = "0.3"
 time = "0.1"
-# tokio-core = "^0.1.9"
-tokio-core = { git = "https://github.com/tokio-rs/tokio-core.git", branch = "master" }
+tokio-core = "^0.1.9"
 tokio-io = "0.1"
