@@ -2,10 +2,12 @@ extern crate kcp;
 extern crate time as ctime;
 extern crate rand;
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::iter::Iterator;
 use std::mem;
+use std::rc::Rc;
 use std::thread;
 use std::time;
 
@@ -22,12 +24,6 @@ fn clock() -> u32 {
 struct DelayPacket {
     data: Vec<u8>,
     ts: u32,
-}
-
-impl DelayPacket {
-    fn new() -> DelayPacket {
-        Default::default()
-    }
 }
 
 struct LatencySimulator {
@@ -117,6 +113,21 @@ impl Read for LatencySimulator {
     }
 }
 
+struct Output {
+    ls: Rc<RefCell<LatencySimulator>>,
+}
+
+impl Write for Output {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut ls = self.ls.borrow_mut();
+        ls.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[test]
 fn kcp_test() {
     let tests = vec!["default", "normal", "fast"];
@@ -127,11 +138,11 @@ fn kcp_test() {
 }
 
 fn test(mode: &str) -> String {
-    let mut alice_to_bob = LatencySimulator::new(10, 60, 125, 1000);
-    let mut bob_to_alice = LatencySimulator::new(10, 60, 125, 1000);
+    let alice_to_bob = Rc::new(RefCell::new(LatencySimulator::new(10, 60, 125, 1000)));
+    let bob_to_alice = Rc::new(RefCell::new(LatencySimulator::new(10, 60, 125, 1000)));
 
-    let mut alice = KCP::new(0x11223344);
-    let mut bob = KCP::new(0x11223344);
+    let mut alice = KCP::new(0x11223344, Output { ls: alice_to_bob.clone() });
+    let mut bob = KCP::new(0x11223344, Output { ls: bob_to_alice.clone() });
 
     let mut current = clock();
     let mut slap = current + 20;
@@ -167,8 +178,8 @@ fn test(mode: &str) -> String {
         thread::sleep(time::Duration::from_millis(1));
         current = clock();
 
-        alice.update(clock(), &mut alice_to_bob);
-        bob.update(clock(), &mut bob_to_alice);
+        alice.update(clock());
+        bob.update(clock());
 
         while current >= slap {
             let mut p: usize = 0;
@@ -179,8 +190,9 @@ fn test(mode: &str) -> String {
             slap += 20;
         }
 
+        let mut a2b = alice_to_bob.borrow_mut();
         loop {
-            match alice_to_bob.read(&mut buffer[..]) {
+            match a2b.read(&mut buffer[..]) {
                 Ok(hr) => {
                     bob.input(&buffer[..hr]).ok();
                 }
@@ -188,8 +200,9 @@ fn test(mode: &str) -> String {
             };
         }
 
+        let mut b2a = bob_to_alice.borrow_mut();
         loop {
-            match bob_to_alice.read(&mut buffer[..]) {
+            match b2a.read(&mut buffer[..]) {
                 Ok(hr) => {
                     alice.input(&buffer[..hr]).ok();
                 }
