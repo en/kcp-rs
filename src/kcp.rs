@@ -307,7 +307,7 @@ impl<W: Write> KCP<W> {
                 self.rx_srtt = 1;
             }
         }
-        let rto = self.rx_srtt + cmp::max(1, 4 * self.rx_rttval);
+        let rto = self.rx_srtt + cmp::max(self.interval, 4 * self.rx_rttval);
         self.rx_rto = bound(self.rx_minrto, rto, KCP_RTO_MAX);
     }
 
