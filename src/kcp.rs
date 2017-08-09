@@ -49,6 +49,7 @@ impl Segment {
     }
 }
 
+/// kcp control block
 pub struct KCP<W: Write> {
     conv: u32,
     mtu: u32,
@@ -93,9 +94,12 @@ pub struct KCP<W: Write> {
     rcv_buf: VecDeque<Segment>,
 
     acklist: Vec<(u32, u32)>,
+
+    // user: String,
     buffer: Vec<u8>,
 
     fastresend: u32,
+
     nocwnd: bool,
     stream: bool,
 
@@ -103,7 +107,9 @@ pub struct KCP<W: Write> {
 }
 
 impl<W: Write> KCP<W> {
-    pub fn new(conv: u32, w: W) -> KCP<W> {
+    /// create a new kcp control object, `conv` must equal in two endpoint
+    /// from the same connection. `user` will be passed to the output callback
+    pub fn new(conv: u32, output: W) -> KCP<W> {
         let mut kcp = KCP {
             // state: 0,
             snd_una: 0,
@@ -132,6 +138,7 @@ impl<W: Write> KCP<W> {
             rmt_wnd: KCP_WND_RCV,
             mtu: KCP_MTU_DEF,
             mss: KCP_MTU_DEF - KCP_OVERHEAD,
+            // user: user,
             buffer: Vec::new(),
             snd_queue: VecDeque::new(),
             rcv_queue: VecDeque::new(),
@@ -143,7 +150,7 @@ impl<W: Write> KCP<W> {
             interval: KCP_INTERVAL,
             ts_flush: KCP_INTERVAL,
             ssthresh: KCP_THRESH_INIT, // dead_link: KCP_DEADLINK,
-            output: w,
+            output: output,
         };
         kcp.buffer.resize(
             ((KCP_MTU_DEF + KCP_OVERHEAD) * 3) as usize,
@@ -152,7 +159,7 @@ impl<W: Write> KCP<W> {
         kcp
     }
 
-    // user/upper level recv: returns size, returns below zero for EAGAIN
+    /// user/upper level recv: returns size, returns Err for EAGAIN
     pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.rcv_queue.is_empty() {
             return Err(Error::new(ErrorKind::Other, "EOF"));
@@ -214,7 +221,7 @@ impl<W: Write> KCP<W> {
         Ok(p)
     }
 
-    // peek data size
+    /// check the size of next message in the recv queue
     fn peeksize(&self) -> Result<usize, i32> {
         let seg = match self.rcv_queue.front() {
             Some(x) => x,
@@ -236,7 +243,7 @@ impl<W: Write> KCP<W> {
         Ok(length)
     }
 
-    // user/upper level send, returns the number of fragments
+    /// user/upper level send, returns Err for error
     pub fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut n = buf.len();
         if n == 0 {
@@ -405,6 +412,7 @@ impl<W: Write> KCP<W> {
         }
     }
 
+    /// when you received a low level packet (eg. UDP packet), call it
     pub fn input(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut n = buf.len();
         if n < KCP_OVERHEAD as usize {
@@ -529,6 +537,7 @@ impl<W: Write> KCP<W> {
         0
     }
 
+    /// flush pending data
     pub fn flush(&mut self) {
         // `update` haven't been called.
         if !self.updated {
@@ -722,9 +731,9 @@ impl<W: Write> KCP<W> {
         }
     }
 
-    // update state (call it repeatedly, every 10ms-100ms), or you can ask
-    // `check` when to call it again (without `input`/`send` calling).
-    // `current` - current timestamp in millisec.
+    /// update state (call it repeatedly, every 10ms-100ms), or you can ask
+    /// `check` when to call it again (without `input`/`send` calling).
+    /// `current` - current timestamp in millisec.
     pub fn update(&mut self, current: u32) {
         self.current = current;
         if !self.updated {
@@ -747,13 +756,13 @@ impl<W: Write> KCP<W> {
         }
     }
 
-    // Determine when should you invoke `update`:
-    // returns when you should invoke `update` in millisec, if there
-    // is no `input`/`send` calling. you can call `update` in that
-    // time, instead of call update repeatly.
-    // Important to reduce unnacessary `update` invoking. use it to
-    // schedule `update` (eg. implementing an epoll-like mechanism,
-    // or optimize `update` when handling massive kcp connections)
+    /// Determine when should you invoke `update`:
+    /// returns when you should invoke `update` in millisec, if there
+    /// is no `input`/`send` calling. you can call `update` in that
+    /// time, instead of call `update` repeatly.
+    /// Important to reduce unnacessary `update` invoking. use it to
+    /// schedule `update` (eg. implementing an epoll-like mechanism,
+    /// or optimize `update` when handling massive kcp connections)
     pub fn check(&self, current: u32) -> u32 {
         if !self.updated {
             return 0;
@@ -786,6 +795,7 @@ impl<W: Write> KCP<W> {
         minimal
     }
 
+    /// change MTU size, default is 1400
     pub fn setmtu(&mut self, mtu: u32) -> bool {
         if mtu < 50 || mtu < KCP_OVERHEAD {
             return false;
@@ -796,6 +806,11 @@ impl<W: Write> KCP<W> {
         true
     }
 
+    /// fastest: nodelay(1, 20, 2, 1)
+    /// `nodelay`: 0:disable(default), 1:enable
+    /// `interval`: internal update timer interval in millisec, default is 100ms
+    /// `resend`: 0:disable fast resend(default), 1:enable fast resend
+    /// `nc`: false:normal congestion control(default), true:disable congestion control
     pub fn nodelay(&mut self, nodelay: i32, interval: i32, resend: i32, nc: bool) {
         if nodelay >= 0 {
             let nodelay = nodelay as u32;
@@ -821,6 +836,7 @@ impl<W: Write> KCP<W> {
         self.nocwnd = nc;
     }
 
+    /// set maximum window size: `sndwnd`=32, `rcvwnd`=32 by default
     pub fn wndsize(&mut self, sndwnd: i32, rcvwnd: i32) {
         if sndwnd > 0 {
             self.snd_wnd = sndwnd as u32;
@@ -830,6 +846,7 @@ impl<W: Write> KCP<W> {
         }
     }
 
+    /// get how many packet is waiting to be sent
     pub fn waitsnd(&self) -> usize {
         self.snd_buf.len() + self.snd_queue.len()
     }
