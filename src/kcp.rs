@@ -1,6 +1,6 @@
 use std::cmp;
 use std::collections::VecDeque;
-use std::io::{self, Cursor, Error, ErrorKind, Write};
+use std::io::{self, Cursor, Error, ErrorKind, Read, Write};
 
 use bytes::{Buf, BufMut, BytesMut, LittleEndian};
 
@@ -43,11 +43,16 @@ struct Segment {
 }
 
 impl Segment {
-    fn new(size: usize) -> Segment {
-        Segment {
-            data: Vec::with_capacity(size),
-            ..Default::default()
-        }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u32::<LittleEndian>(self.conv);
+        buf.put::<u8>(self.cmd as u8);
+        buf.put::<u8>(self.frg as u8);
+        buf.put_u16::<LittleEndian>(self.wnd as u16);
+        buf.put_u32::<LittleEndian>(self.ts);
+        buf.put_u32::<LittleEndian>(self.sn);
+        buf.put_u32::<LittleEndian>(self.una);
+        buf.put_u32::<LittleEndian>(self.data.len() as u32);
+        buf.put_slice(&self.data);
     }
 }
 
@@ -240,34 +245,32 @@ impl<W: Write> KCP<W> {
 
     /// user/upper level send, returns Err for error
     pub fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut n = buf.len();
+        let n = buf.len();
         if n == 0 {
             return Err(Error::new(ErrorKind::InvalidInput, "no data available"));
         }
-        let mut p: usize = 0;
+        let mut buf = Cursor::new(buf);
 
         // append to previous segment in streaming mode (if possible)
         if self.stream {
             if let Some(seg) = self.snd_queue.back_mut() {
                 let l = seg.data.len();
                 if l < self.mss as usize {
-                    let capacity = self.mss as usize - l;
-                    let extend = cmp::min(n, capacity);
-                    seg.data.extend_from_slice(&buf[p..p + extend]);
+                    let new_len = cmp::min(l + n, self.mss as usize);
+                    seg.data.resize(new_len, 0);
+                    buf.read_exact(&mut seg.data[l..new_len])?;
                     seg.frg = 0;
-                    p += extend;
-                    n -= extend;
-                    if n == 0 {
+                    if buf.remaining() == 0 {
                         return Ok(1);
                     }
                 }
             };
         }
 
-        let count = if n <= self.mss as usize {
+        let count = if buf.remaining() <= self.mss as usize {
             1
         } else {
-            (n + self.mss as usize - 1) / self.mss as usize
+            (buf.remaining() + self.mss as usize - 1) / self.mss as usize
         };
 
         if count > 255 {
@@ -277,20 +280,18 @@ impl<W: Write> KCP<W> {
 
         // fragment
         for i in 0..count {
-            let size = cmp::min(self.mss as usize, n);
-            let mut seg = Segment::new(size);
-            seg.data.extend_from_slice(&buf[p..p + size]);
+            let size = cmp::min(self.mss as usize, buf.remaining());
+            let mut seg = Segment::default();
+            seg.data.resize(size, 0);
+            buf.read_exact(&mut seg.data)?;
             seg.frg = if !self.stream {
                 (count - i - 1) as u32
             } else {
                 0
             };
             self.snd_queue.push_back(seg);
-
-            p += size;
-            n -= size;
         }
-        Ok(p)
+        Ok(n - buf.remaining())
     }
 
     fn update_ack(&mut self, rtt: u32) {
@@ -470,7 +471,7 @@ impl<W: Write> KCP<W> {
                 if sn < self.rcv_nxt + self.rcv_wnd {
                     self.acklist.push((sn, ts));
                     if sn >= self.rcv_nxt {
-                        let mut seg = Segment::new(len);
+                        let mut seg = Segment::default();
                         seg.conv = conv;
                         seg.cmd = cmd;
                         seg.frg = frg as u32;
@@ -479,7 +480,7 @@ impl<W: Write> KCP<W> {
                         seg.sn = sn;
                         seg.una = una;
                         seg.data.resize(len, 0);
-                        buf.copy_to_slice(&mut seg.data);
+                        buf.read_exact(&mut seg.data)?;
                         self.parse_data(seg);
                     }
                 }
@@ -538,7 +539,7 @@ impl<W: Write> KCP<W> {
         let current = self.current;
         let mut lost = false;
         let mut change = false;
-        let mut seg = Segment::new(0);
+        let mut seg = Segment::default();
 
         seg.conv = self.conv;
         seg.cmd = KCP_CMD_ACK;
@@ -553,7 +554,7 @@ impl<W: Write> KCP<W> {
             }
             seg.sn = ack.0;
             seg.ts = ack.1;
-            encode_seg(&mut self.buffer, &seg);
+            seg.encode(&mut self.buffer);
         }
         self.acklist.clear();
 
@@ -587,7 +588,7 @@ impl<W: Write> KCP<W> {
                 self.output.write_all(&self.buffer);
                 self.buffer.clear();
             }
-            encode_seg(&mut self.buffer, &seg);
+            seg.encode(&mut self.buffer);
         }
 
         // flush window probing commands
@@ -597,7 +598,7 @@ impl<W: Write> KCP<W> {
                 self.output.write_all(&self.buffer);
                 self.buffer.clear();
             }
-            encode_seg(&mut self.buffer, &seg);
+            seg.encode(&mut self.buffer);
         }
         self.probe = 0;
 
@@ -677,7 +678,7 @@ impl<W: Write> KCP<W> {
                     self.output.write_all(&self.buffer);
                     self.buffer.clear();
                 }
-                encode_seg(&mut self.buffer, &segment);
+                segment.encode(&mut self.buffer);
 
                 // never used
                 // if segment.xmit >= self.dead_link {
@@ -850,16 +851,4 @@ fn timediff(later: u32, earlier: u32) -> i32 {
 #[inline]
 fn bound(lower: u32, v: u32, upper: u32) -> u32 {
     cmp::min(cmp::max(lower, v), upper)
-}
-
-fn encode_seg(buf: &mut BytesMut, seg: &Segment) {
-    buf.put_u32::<LittleEndian>(seg.conv);
-    buf.put::<u8>(seg.cmd as u8);
-    buf.put::<u8>(seg.frg as u8);
-    buf.put_u16::<LittleEndian>(seg.wnd as u16);
-    buf.put_u32::<LittleEndian>(seg.ts);
-    buf.put_u32::<LittleEndian>(seg.sn);
-    buf.put_u32::<LittleEndian>(seg.una);
-    buf.put_u32::<LittleEndian>(seg.data.len() as u32);
-    buf.put_slice(&seg.data);
 }

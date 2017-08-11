@@ -1,16 +1,17 @@
+extern crate bytes;
 extern crate kcp;
-extern crate time as ctime;
 extern crate rand;
+extern crate time as ctime;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::iter::Iterator;
-use std::mem;
 use std::rc::Rc;
 use std::thread;
 use std::time;
 
+use bytes::{ByteOrder, LittleEndian};
 use kcp::KCP;
 
 #[inline]
@@ -183,9 +184,11 @@ fn test(mode: &str) -> String {
 
         while current >= slap {
             let mut p: usize = 0;
-            encode32u(&mut buffer[..], &mut p, index);
+            LittleEndian::write_u32(&mut buffer[p..p + 4], index);
+            p += 4;
             index += 1;
-            encode32u(&mut buffer[..], &mut p, current);
+            LittleEndian::write_u32(&mut buffer[p..p + 4], current);
+            p += 4;
             alice.send(&buffer[..p]).unwrap();
             slap += 20;
         }
@@ -223,8 +226,9 @@ fn test(mode: &str) -> String {
             match alice.recv(&mut buffer[..10]) {
                 Ok(_) => {
                     let mut p: usize = 0;
-                    let sn = decode32u(&buffer, &mut p);
-                    let ts = decode32u(&buffer, &mut p);
+                    let sn = LittleEndian::read_u32(&buffer[p..p + 4]);
+                    p += 4;
+                    let ts = LittleEndian::read_u32(&buffer[p..p + 4]);
                     let rtt = current - ts;
                     if sn != next {
                         println!("ERROR sn {}<->{}", count, next);
@@ -251,53 +255,6 @@ fn test(mode: &str) -> String {
     ts1 = clock() - ts1;
     format!("{} mode result ({}ms):\n", mode, ts1) +
         &format!("avgrtt={} maxrtt={}", sumrtt / count, maxrtt)
-}
-
-#[test]
-fn test_decode32u() {
-    let mut buf = vec![0u8; 16];
-    let mut p = 0;
-
-    let n = decode32u(&buf, &mut p);
-    assert_eq!(0, n);
-    assert_eq!(4, p);
-
-    buf[4] = 7;
-    let n = decode32u(&buf, &mut p);
-    assert_eq!(7, n);
-    assert_eq!(8, p);
-
-    buf[8..12].copy_from_slice(&[13u8, 1, 0, 0]);
-    let n = decode32u(&buf, &mut p);
-    assert_eq!(256 + 13, n);
-    assert_eq!(12, p);
-}
-
-#[test]
-fn test_encode32u() {
-    let mut buf = vec![0u8; 4];
-    let mut p = 0;
-    encode32u(&mut buf, &mut p, 256 + 13);
-
-    assert_eq!(vec![13, 1, 0, 0], buf);
-    assert_eq!(4, p);
-}
-
-#[inline]
-fn decode32u(buf: &[u8], p: &mut usize) -> u32 {
-    let buf = &buf[*p..];
-    let n: u32 = unsafe { mem::transmute([buf[0], buf[1], buf[2], buf[3]]) };
-    *p += 4;
-    u32::from_le(n)
-}
-
-#[inline]
-fn encode32u(buf: &mut [u8], p: &mut usize, n: u32) {
-    let n = n.to_le();
-    let data: [u8; 4] = unsafe { mem::transmute(n) };
-    let buf = &mut buf[*p..];
-    buf[..data.len()].copy_from_slice(&data);
-    *p += 4;
 }
 
 struct Random {
