@@ -5,9 +5,8 @@ authors = ["Yuanchao Sun <yuanchao.sun@gmail.com>"]
 
 [dependencies]
 bytes = "0.4"
-env_logger = { version = "0.4", default-features = false }
 futures = "0.1"
-iovec    = "0.1.0"
+iovec    = "0.1"
 mio = "0.6"
 rand = "0.3"
 time = "0.1"
