@@ -7,24 +7,24 @@ use bytes::{Buf, BufMut, BytesMut, LittleEndian};
 const KCP_RTO_NDL: u32 = 30; // no delay min rto
 const KCP_RTO_MIN: u32 = 100; // normal min rto
 const KCP_RTO_DEF: u32 = 200;
-const KCP_RTO_MAX: u32 = 60000;
+const KCP_RTO_MAX: u32 = 60_000;
 const KCP_CMD_PUSH: u8 = 81; // cmd: push data
 const KCP_CMD_ACK: u8 = 82; // cmd: ack
 const KCP_CMD_WASK: u8 = 83; // cmd: window probe (ask)
 const KCP_CMD_WINS: u8 = 84; // cmd: window size (tell)
-const KCP_ASK_SEND: u32 = 1; // need to send KCP_CMD_WASK
-const KCP_ASK_TELL: u32 = 2; // need to send KCP_CMD_WINS
+const KCP_ASK_SEND: u32 = 0b01; // need to send KCP_CMD_WASK
+const KCP_ASK_TELL: u32 = 0b10; // need to send KCP_CMD_WINS
 const KCP_WND_SND: u32 = 32;
 const KCP_WND_RCV: u32 = 32;
-const KCP_MTU_DEF: usize = 1400;
+const KCP_MTU_DEF: usize = 1_400;
 // const KCP_ACK_FAST: u32 = 3; // never used
 const KCP_INTERVAL: u32 = 100;
 const KCP_OVERHEAD: usize = 24;
 // const KCP_DEADLINK: u32 = 20; // never used
 const KCP_THRESH_INIT: u32 = 2;
 const KCP_THRESH_MIN: u32 = 2;
-const KCP_PROBE_INIT: u32 = 7000; // 7 secs to probe window size
-const KCP_PROBE_LIMIT: u32 = 120000; // up to 120 secs to probe window
+const KCP_PROBE_INIT: u32 = 7_000; // 7 secs to probe window size
+const KCP_PROBE_LIMIT: u32 = 120_000; // up to 120 secs to probe window
 
 #[derive(Default)]
 struct Segment {
@@ -416,11 +416,7 @@ impl<W: Write> Kcb<W> {
         let old_una = self.snd_una;
         let mut flag = false;
         let mut maxack: u32 = 0;
-        loop {
-            if buf.remaining() < KCP_OVERHEAD {
-                break;
-            }
-
+        while buf.remaining() >= KCP_OVERHEAD {
             let conv = buf.get_u32::<LittleEndian>();
             if conv != self.conv {
                 return Err(Error::new(ErrorKind::InvalidData, "invalid data"));
