@@ -12,7 +12,7 @@ use std::thread;
 use std::time;
 
 use bytes::{ByteOrder, LittleEndian};
-use kcp::KCP;
+use kcp::Kcb;
 
 #[inline]
 fn clock() -> u32 {
@@ -130,7 +130,7 @@ impl Write for Output {
 }
 
 #[test]
-fn kcp_test() {
+fn kcb_tests() {
     let tests = vec!["default", "normal", "fast"];
     let results = tests.into_iter().map(|t| test(t)).collect::<Vec<_>>();
     for result in results {
@@ -142,8 +142,8 @@ fn test(mode: &str) -> String {
     let alice_to_bob = Rc::new(RefCell::new(LatencySimulator::new(10, 60, 125, 1000)));
     let bob_to_alice = Rc::new(RefCell::new(LatencySimulator::new(10, 60, 125, 1000)));
 
-    let mut alice = KCP::new(0x11223344, Output { ls: alice_to_bob.clone() });
-    let mut bob = KCP::new(0x11223344, Output { ls: bob_to_alice.clone() });
+    let mut alice = Kcb::new(0x11223344, Output { ls: alice_to_bob.clone() });
+    let mut bob = Kcb::new(0x11223344, Output { ls: bob_to_alice.clone() });
 
     let mut current = clock();
     let mut slap = current + 20;
